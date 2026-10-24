@@ -138,6 +138,31 @@ jobs:
         retention-days: 7
         if-no-files-found: error
 
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: yarn
+
+    - name: Install
+      run: yarn install --frozen-lockfile
+
+    # Upstream ships ~1,300 existing lint errors (mostly whitespace/indent). Reported but
+    # non-blocking until a dedicated cleanup lands; typecheck and build stay required.
+    - name: Lint (non-blocking)
+      continue-on-error: true
+      run: yarn lint
+
+    - name: Typecheck
+      run: yarn typecheck
+
+    - name: Build
+      run: yarn build
+
   postgres-migrations:
     runs-on: ubuntu-latest
     services:
