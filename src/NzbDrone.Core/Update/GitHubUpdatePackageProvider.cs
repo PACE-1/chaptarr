@@ -20,8 +20,8 @@ namespace NzbDrone.Core.Update
 
     public class GitHubUpdatePackageProvider : IGitHubUpdatePackageProvider
     {
-        // Default to the Chaptarr repository
-        private const string DefaultOwner = "chaptarr";
+        // Releases come from the fork, not upstream, so upstream versions are never offered
+        private const string DefaultOwner = "PACE-1";
         private const string DefaultRepo = "chaptarr";
         private static readonly string[] Sha256AssetSuffixes = { ".sha256", ".sha256sum", ".sha256.txt", ".sha256sums", ".sha256sums.txt" };
 
