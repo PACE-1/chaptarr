@@ -1,0 +1,129 @@
+# chaptarr-provision configuration. Copy to /etc/chaptarr-provision/config.toml, chmod 600.
+#
+# Path templates accept {slug} (derived from the ABS username: lowercase, [a-z0-9-]) and
+# {username} (the ABS username as typed). Every folder has up to three views of the same place:
+#   host      - the path on the Docker host (the provisioner creates it; compose mounts it)
+#   container - the path inside the user's Chaptarr container
+#   abs       - the path inside the Audiobookshelf container (used for the ABS libraries)
+#
+# Any secret can be given inline (key = "...") or read from a file (key_file = "/run/secrets/...").
+
+state_dir = "/var/lib/chaptarr-provision"   # per-user state + profiles.json (kept 0600/0700)
+stacks_dir = "/opt/chaptarr-stacks"         # <stacks_dir>/chaptarr-<slug>/compose.yaml + .env
+hooks_dir = "/etc/chaptarr-provision/hooks.d"  # executables run after a successful create
+http_timeout = 30
+
+[server]
+listen = "0.0.0.0:8790"
+# Shared secret the ABS plugin sends as "Authorization: Bearer <token>". Required for `serve`.
+# Generate with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+token_file = "/etc/chaptarr-provision/token"
+# token = "..."   # or env CHAPTARR_PROVISION_TOKEN
+
+[abs]
+url = "http://audiobookshelf:80"            # as reachable from the provisioner
+api_key_file = "/etc/chaptarr-provision/abs_api_key"   # an ABS *admin* API key
+plugin_id = "chaptarr"                      # PATCH /api/plugins/<plugin_id>/settings
+library_provider = "google"                 # metadata provider for the new ABS libraries
+ebook_library_icon = "books-1"
+audiobook_library_icon = "audiobookshelf"
+# Permission overrides for ABS users the provisioner creates (accessAllLibraries is always false).
+# user_permissions = { upload = false, accessExplicitContent = true }
+
+[docker]
+network = "audiobookshelf_default"          # the ABS container's network (must already exist)
+image = "ghcr.io/pace-1/chaptarr:develop"
+container_prefix = "chaptarr-"              # container + DNS name: chaptarr-<slug>
+puid = 1000
+pgid = 1000
+tz = "Etc/UTC"
+# umask = "002"
+# Extra mounts for every instance, e.g. the shared download client's completed folder.
+extra_volumes = ["/srv/downloads:/downloads"]
+# extra_env = { Chaptarr__Log__Level = "info" }
+ready_timeout = 180
+# How the provisioner itself reaches the instance API:
+#   unset      -> http://chaptarr-<slug>:8789 (provisioner on the same network: container mode)
+#   "inspect"  -> container IP from `docker inspect` (provisioner running directly on the host)
+# provisioner_url = "inspect"
+# Skip Chaptarr's connection test when adding download clients / indexers.
+force_save = false
+
+[paths.config]
+host = "/srv/chaptarr/{slug}/config"
+container = "/config"
+
+[paths.ebooks]
+host = "/srv/media/users/{slug}/ebooks"
+container = "/books/ebooks"
+abs = "/media/users/{slug}/ebooks"
+
+[paths.audiobooks]
+host = "/srv/media/users/{slug}/audiobooks"
+container = "/books/audiobooks"
+abs = "/media/users/{slug}/audiobooks"
+
+# downloads/ebook and downloads/audiobook are created under this folder.
+[paths.downloads]
+host = "/srv/downloads/chaptarr-{slug}"
+container = "/downloads/chaptarr-{slug}"
+
+# An existing Chaptarr to copy quality/metadata profiles and indexers from.
+[template]
+url = "http://chaptarr:8789"
+api_key_file = "/etc/chaptarr-provision/template_api_key"
+copy_quality_profiles = true
+copy_metadata_profiles = true
+copy_indexers = true          # ignored when [prowlarr] is configured
+# Profiles used for the two root folders (default: first profile of the matching type).
+# ebook_quality_profile = "E-Book"
+# audiobook_quality_profile = "Audiobook"
+# ebook_metadata_profile = "Standard"
+# audiobook_metadata_profile = "Standard"
+
+# Indexer secrets: the API masks them on read, so copied indexers need them from here.
+# Keyed by the indexer's name on the template; values are provider field names.
+# [indexer_secrets."MyAnonamouse"]
+# mamId = "..."
+
+# Download clients for each instance. With from_template = true (default) the client of the
+# same name (or template_name) on the template is cloned; otherwise `implementation` is used
+# with the instance's defaults. `fields` overrides provider fields by name (camelCase, as the
+# API shows them). Secret fields MUST be set here: the template returns them masked.
+[[download_clients]]
+name = "qBittorrent"
+implementation = "QBittorrent"
+from_template = true
+ebook_category = "chaptarr-{slug}-ebook"          # sets field ebookCategory
+audiobook_category = "chaptarr-{slug}-audiobook"  # sets field audiobookCategory
+[download_clients.fields]
+host = "qbittorrent"
+port = 8080
+username = "admin"
+password = "change-me"
+
+[[download_clients.remote_path_mappings]]
+remote_path = "/downloads/"      # path as the download client reports it
+local_path = "/downloads/"       # same files inside the Chaptarr container
+
+# [[download_clients]]
+# name = "SABnzbd"
+# implementation = "Sabnzbd"
+# from_template = false
+# [download_clients.fields]
+# host = "sabnzbd"
+# port = 8080
+# apiKey = "..."
+
+# Optional: register each instance as a Prowlarr application instead of copying indexers.
+# [prowlarr]
+# url = "http://prowlarr:9696"
+# api_key_file = "/etc/chaptarr-provision/prowlarr_api_key"
+# implementation = "Readarr"            # Prowlarr app type that speaks Chaptarr's /api/v1
+# prowlarr_url = "http://prowlarr:9696" # how the instance reaches Prowlarr
+# sync_level = "fullSync"
+
+# Optional: Shelfmark user id per ABS user (keyed by ABS user id or username). Applied to an
+# instance's "Shelfmark" download client once that client exists.
+# [shelfmark.users]
+# isaac = "1"
