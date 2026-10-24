@@ -522,6 +522,7 @@ class ServeTests(unittest.TestCase):
         status, users = self.call("GET", "/v1/users")
         self.assertEqual(status, 200)
         self.assertEqual(users[0]["state"], "provisioned")
+        self.assertEqual(users[0]["lastJobId"], body["jobId"])
         self.assertEqual(set(users[0]) >= {"absUserId", "username", "slug", "state", "url", "createdAt"}, True)
         for path in ("/v1/users", f"/v1/jobs/{body['jobId']}", "/v1/users/tess"):
             self.assertNotIn(key, json.dumps(self.call("GET", path)[1]))

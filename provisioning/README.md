@@ -145,7 +145,7 @@ always JSON. API keys and passwords are never returned.
 | method | path | response |
 |---|---|---|
 | GET | `/v1/health` | `{ok, version}` |
-| GET | `/v1/users` | `[{absUserId, username, slug, state, url, createdAt, error?}]`, with `state` one of `pending`, `running`, `provisioned`, `failed`, `deleted`, `imported` |
+| GET | `/v1/users` | `[{absUserId, username, slug, state, url, createdAt, error?, lastJobId?}]`, with `state` one of `pending`, `running`, `provisioned`, `failed`, `deleted`, `imported`. `lastJobId` is the latest job this server process ran for that user, so a UI can reattach to its progress. |
 | GET | `/v1/users/{slug}` | the user's state (steps, ids, errors), without the API key |
 | POST | `/v1/users` | body `{absUserId?, username, password?}` returns `202 {jobId}`. Without `absUserId` the ABS user is created and `password` is required. A POST for a username whose job is still queued or running returns that job. Otherwise a new job starts and resumes from the saved state. |
 | GET | `/v1/jobs/{jobId}` | `{jobId, state: queued\|running\|done\|failed, steps: [{name, state, detail?}], result?, error?}` |

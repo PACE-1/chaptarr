@@ -1542,6 +1542,11 @@ class JobManager:
         with self.lock:
             return any(j["slug"] == slug and j["state"] in ("queued", "running") for j in self.jobs.values())
 
+    def last_by_slug(self) -> dict[str, str]:
+        """Most recent job id per slug, so a UI can reattach to progress after a reload."""
+        with self.lock:
+            return {j["slug"]: jid for jid, j in sorted(self.jobs.items(), key=lambda kv: kv[1]["createdAt"])}
+
     def get(self, job_id: str) -> dict | None:
         with self.lock:
             job = self.jobs.get(job_id)
@@ -1643,7 +1648,12 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
             if route == ("GET", ("v1", "health"), 2):
                 self._send(200, {"ok": True, "version": VERSION})
             elif route == ("GET", ("v1", "users"), 2):
-                self._send(200, self.provisioner.list_users())
+                rows = self.provisioner.list_users()
+                last = self.jobs.last_by_slug()
+                for row in rows:
+                    if row.get("slug") in last:
+                        row["lastJobId"] = last[row["slug"]]
+                self._send(200, rows)
             elif route == ("POST", ("v1", "users"), 2):
                 self._create(self._body())
             elif route == ("GET", ("v1", "jobs"), 3):
