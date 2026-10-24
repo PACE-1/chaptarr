@@ -8,9 +8,9 @@ on:
   workflow_call:
   workflow_dispatch:
 
-# Tests only, never publishes. PRs and merges are both validated automatically, but
-# nothing reaches users until release.yml is run by hand; docker-publish.yml is
-# workflow_call-only, so no run started here can push an image.
+# Tests only, never publishes. docker-publish.yml follows a green push build on
+# develop and publishes :develop; PR runs never publish. Versioned images and
+# :latest come only from release.yml, which is run by hand.
 
 # One live run per PR and per branch: a newer push supersedes the older run, so a
 # batch of merges costs one build of the combined result rather than one each.
