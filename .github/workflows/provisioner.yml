@@ -1,0 +1,96 @@
+name: Provisioner
+
+on:
+  pull_request:
+    paths:
+      - "provisioning/**"
+      - ".github/workflows/provisioner.yml"
+  push:
+    branches: [develop]
+    paths:
+      - "provisioning/**"
+      - ".github/workflows/provisioner.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provisioner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    container:
+      image: python:${{ matrix.python }}-slim
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+    - name: Byte-compile
+      run: python -m py_compile provisioning/chaptarr_provision.py provisioning/tests/*.py
+
+    - name: Unit tests
+      run: python -m unittest discover -v provisioning/tests
+
+    - name: Lint (ruff)
+      if: matrix.python == '3.12'
+      run: |
+        pip install --disable-pip-version-check --no-cache-dir ruff==0.16.9
+        ruff check --config provisioning/ruff.toml provisioning
+
+  publish:
+    name: Publish image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/pace-1/chaptarr-provisioner
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+    - name: Log in to GHCR
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Compute tags
+      id: tags
+      shell: bash
+      run: |
+        short="${GITHUB_SHA::7}"
+        {
+          echo 'tags<<EOF'
+          echo "${IMAGE}:develop"
+          echo "${IMAGE}:sha-${short}"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Build and push
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+      with:
+        context: provisioning
+        file: provisioning/Dockerfile
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.tags.outputs.tags }}
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.description=Per-user Chaptarr provisioner for Audiobookshelf
+        cache-from: type=gha,scope=provisioner
+        cache-to: type=gha,mode=max,scope=provisioner
