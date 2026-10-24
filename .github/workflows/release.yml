@@ -25,17 +25,6 @@ jobs:
           exit 1
         fi
 
-    - name: Require Docker credentials
-      shell: bash
-      env:
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: |
-        set -euo pipefail
-        if [[ -z "$DOCKER_USERNAME" || -z "$DOCKER_PASSWORD" ]]; then
-          echo "Docker credentials are required before a release can start."
-          exit 1
-        fi
 
   validate:
     needs: preflight
@@ -155,6 +144,9 @@ jobs:
   # Images publish here and nowhere else, so merging PRs never ships an update.
   docker:
     needs: release
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/docker-publish.yml
     with:
       sha: ${{ needs.release.outputs.sha }}

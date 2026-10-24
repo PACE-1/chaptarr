@@ -8,9 +8,9 @@ on:
   workflow_call:
   workflow_dispatch:
 
-# Tests only, never publishes. PRs and merges are both validated automatically, but
-# nothing reaches users until release.yml is run by hand; docker-publish.yml is
-# workflow_call-only, so no run started here can push an image.
+# Tests only, never publishes. docker-publish.yml follows a green push build on
+# develop and publishes :develop; PR runs never publish. Versioned images and
+# :latest come only from release.yml, which is run by hand.
 
 # One live run per PR and per branch: a newer push supersedes the older run, so a
 # batch of merges costs one build of the combined result rather than one each.
@@ -22,21 +22,79 @@ concurrency:
 permissions:
   contents: read
 
-jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            platform: linux
-          - os: windows-latest
-            platform: win
-          - os: macos-latest
-            platform: osx
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
+jobs:
+  # Decides which halves of the build a change touches. Job-level conditions (not
+  # workflow-level `paths:`) keep every check reporting: a job skipped here
+  # counts as passed, so a required check can never be left pending.
+  # Only PRs and pushes are filtered; release/manual runs always build everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        fetch-depth: 2
+
+    - name: Classify changed files
+      id: filter
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        BEFORE: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+
+        everything() {
+          echo "$1; building everything."
+          { echo "backend=true"; echo "frontend=true"; } >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+
+        case "$EVENT" in
+          pull_request)
+            # The PR checkout is the test merge commit; its first parent is the base tip.
+            git rev-parse --verify --quiet HEAD^2 >/dev/null || everything "PR head is not a merge commit"
+            BASE="HEAD^1"
+            ;;
+          push)
+            [[ -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] || everything "No previous commit for this push"
+            git fetch --no-tags --depth=1 origin "$BEFORE" || everything "Previous commit $BEFORE is not fetchable"
+            BASE="$BEFORE"
+            ;;
+          *)
+            everything "Event $EVENT is not filtered"
+            ;;
+        esac
+
+        backend=false
+        frontend=false
+        while IFS= read -r f; do
+          [[ -z "$f" ]] && continue
+          echo "changed: $f"
+          case "$f" in
+            # Documentation never affects a build.
+            *.md|docs/*|LICENSE) ;;
+            frontend/*) frontend=true ;;
+            src/*) backend=true ;;
+            # Root and tooling files (package.json, workflows, Tools/, ...) may feed either side.
+            *) backend=true; frontend=true ;;
+          esac
+        done < <(git diff --name-only "$BASE" HEAD)
+
+        echo "backend=$backend frontend=$frontend"
+        { echo "backend=$backend"; echo "frontend=$frontend"; } >> "$GITHUB_OUTPUT"
+
+  # Repository and version guards are OS-independent, so they run once, on Linux,
+  # and in parallel with the builds. They always run, even for docs-only changes.
+  guards:
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
@@ -95,14 +153,28 @@ jobs:
         fi
 
         python3 build-tools/version_guard.py commit-hygiene --compare-ref "$COMPARE_REF"
-    
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pull requests run the full test suite on Linux and macOS, which finish in
+        # about the same time. Windows is the long pole (roughly twice as slow), so it
+        # runs on every push to develop/main and in release validation instead.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
     - name: Setup .NET
       uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
       with:
         dotnet-version: 10.0.x
 
     - name: Cache NuGet packages
-      if: runner.os == 'Windows'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.nuget/packages
@@ -125,20 +197,53 @@ jobs:
     - name: Test
       run: dotnet test src/Chaptarr.Core.Test/Chaptarr.Core.Test.csproj --configuration Release --no-restore --verbosity normal
     
+    # The publish output is framework-dependent and nothing downstream consumes it
+    # (images build from source, native zips are suppressed), so PRs skip it.
     - name: Publish
+      if: github.event_name != 'pull_request'
       run: |
         dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o ./publish/Chaptarr
         dotnet publish src/NzbDrone.Update/Chaptarr.Update.csproj -c Release -f net10.0 -o ./publish/Chaptarr/Chaptarr.Update
     
     - name: Upload artifacts
+      if: github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
-        name: chaptarr-${{ matrix.platform }}
+        name: chaptarr-${{ runner.os == 'Windows' && 'win' || runner.os == 'macOS' && 'osx' || 'linux' }}
         path: ./publish/
         retention-days: 7
         if-no-files-found: error
 
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: yarn
+
+    - name: Install
+      run: yarn install --frozen-lockfile
+
+    # Upstream ships ~1,300 existing lint errors (mostly whitespace/indent). Reported but
+    # non-blocking until a dedicated cleanup lands; typecheck and build stay required.
+    - name: Lint (non-blocking)
+      continue-on-error: true
+      run: yarn lint
+
+    - name: Typecheck
+      run: yarn typecheck
+
+    - name: Build
+      run: yarn build
+
   postgres-migrations:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -161,6 +266,14 @@ jobs:
       uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
       with:
         dotnet-version: 10.0.x
+
+    - name: Cache NuGet packages
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-${{ runner.arch }}-nuget-${{ hashFiles('src/NuGet.config', 'src/Directory.Packages.props', 'src/Directory.Build.props', 'src/Directory.Build.targets', 'src/Targets/**/*.targets', 'src/Chaptarr.NoTests.sln', 'src/**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-nuget-
 
     - name: Install PostgreSQL client
       shell: bash

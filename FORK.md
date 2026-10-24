@@ -21,9 +21,10 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 
 ## CI and releases
 
-- GitHub (`PACE-1/chaptarr`) is the source of truth: branches, PRs and merges happen there. GitHub Actions are not used.
-- Forgejo (`isaac/chaptarr`) runs all CI on the `ci-linux` runners. `sync-from-github.yml` copies every GitHub branch and tag into it every 10 minutes (Forgejo-only branches are left alone), and `ci.yml` runs on every synced branch.
-- A `v*` tag (or a manual run) publishes `git.banditserver.com/<owner>/chaptarr` for linux/amd64 after every check passes.
+Everything runs on GitHub Actions in `PACE-1/chaptarr`. Forgejo isn't used until the codebase moves there.
+
+- `build.yml` runs on every PR and push to `develop`/`main`. It covers the backend build and tests on Linux, Windows and macOS, the frontend typecheck and build, and the Postgres migration smoke test.
+- `docker-publish.yml` publishes `ghcr.io/pace-1/chaptarr:develop` (plus `:sha-<short>`) after every green push build on `develop`. A manual run on any other branch publishes `:branch-<name>` for testing.
+- `release.yml` (manual) tags the version in `package.json`, creates the GitHub release, and publishes `:<version>`, plus `:latest` from `main`.
 - The in-app update check reads releases from `PACE-1/chaptarr`, never from upstream.
 - Every change is verified on **librarytest** before it is promoted to prod.
-- The `image` job runs on the `docker` label and mounts `/var/run/docker.sock` into its job container. The runner config must list it, e.g. `container: valid_volumes: ["/var/run/docker.sock"]` in act_runner's `config.yaml`. Otherwise the job fails with a message saying so.

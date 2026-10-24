@@ -1,7 +1,14 @@
 name: Docker Build and Publish
 
-# Never fires on its own. Only release.yml can call it after manual CI succeeds.
+# Publishes to GitHub Container Registry (ghcr.io/<owner>/chaptarr).
+# - Every push to develop publishes :develop and :sha-<short>, once build.yml passed on it.
+# - release.yml calls this for version tags (:<version>, plus :latest on main).
+# - A manual run on any other branch publishes :branch-<name> for testing.
 on:
+  workflow_run:
+    workflows: [ "Build Chaptarr" ]
+    types: [ completed ]
+    branches: [ develop ]
   workflow_call:
     inputs:
       sha:
@@ -10,114 +17,96 @@ on:
       branch:
         required: true
         type: string
-    secrets:
-      DOCKER_USERNAME:
-        required: true
-      DOCKER_PASSWORD:
-        required: true
+  workflow_dispatch:
 
-env:
-  REGISTRY: docker.io
-  IMAGE_NAMES: robertlordhood/chaptarr chaptarr/chaptarr
+concurrency:
+  group: docker-${{ inputs.branch || github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
 
 jobs:
   build-and-push:
+    # Develop images only follow a green push build; release and manual runs always proceed.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
-        ref: ${{ inputs.sha }}
+        ref: ${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
         fetch-depth: 0
+
+    # Only the runtime stage (apt packages, tool version checks) runs as arm64 under
+    # emulation; the .NET and UI builds cross-compile on the amd64 build platform.
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      with:
+        platforms: arm64
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
-    - name: Validate release inputs
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [[ "${{ inputs.branch }}" != "develop" && "${{ inputs.branch }}" != "main" ]]; then
-          echo "Docker publication requires branch=develop or branch=main."
-          exit 1
-        fi
-
-        if [[ "$(git rev-parse HEAD)" != "${{ inputs.sha }}" ]]; then
-          echo "Checked-out commit does not match the release commit."
-          exit 1
-        fi
-
-    - name: Log in to Docker Hub
+    - name: Log in to GHCR
       uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Generate Docker tags
       id: docker-tags
       shell: bash
+      env:
+        BRANCH: ${{ inputs.branch || github.event.workflow_run.head_branch || github.ref_name }}
+        RELEASE: ${{ inputs.sha && 'true' || 'false' }}
       run: |
         set -euo pipefail
 
+        image="ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/chaptarr"
         sha="$(git rev-parse HEAD)"
-        branch="${{ inputs.branch }}"
-        version="$(python3 -c "import json; print(json.load(open('package.json', encoding='utf-8'))['version'])")"
-        release_tag="v${version}"
+        tags=("$image:sha-${sha:0:7}")
 
-        if [[ "$(git tag --points-at "$sha" --list "$release_tag")" != "$release_tag" ]]; then
-          echo "Release tag $release_tag does not point to $sha; refusing to publish Docker images."
-          exit 1
-        fi
-
-        tags=()
-
-        for name in ${IMAGE_NAMES}; do
-          image="${REGISTRY}/${name}"
-
-          if [[ "$branch" == "main" || "$branch" == "develop" ]]; then
-            tags+=("$image:$branch")
+        if [[ "$RELEASE" == "true" ]]; then
+          version="$(python3 -c "import json; print(json.load(open('package.json', encoding='utf-8'))['version'])")"
+          if [[ "$(git tag --points-at "$sha" --list "v${version}")" != "v${version}" ]]; then
+            echo "Release tag v${version} does not point to $sha; refusing to publish."
+            exit 1
           fi
-
-          if [[ "$branch" == "main" ]]; then
+          tags+=("$image:${version}")
+          if [[ "$BRANCH" == "main" ]]; then
             tags+=("$image:latest")
           fi
-
-          # Exact versions only. No rolling major/minor tags: every Chaptarr release
-          # so far is 0.9.x, so a ":0.9" tag would just be a second "latest" that
-          # also tracks develop. Users pin main, develop, or an exact version.
-          while IFS= read -r tag; do
-            tags+=("$image:${tag#v}")
-          done < <(git tag --points-at "$sha" 'v*' | sort -V)
-        done
-
-        if [[ "${#tags[@]}" -eq 0 ]]; then
-          echo "No Docker tags generated for $sha; skipping publish."
-          echo "has_tags=false" >> "$GITHUB_OUTPUT"
-          exit 0
+        elif [[ "$BRANCH" == "develop" ]]; then
+          tags+=("$image:develop")
+        else
+          # Manual runs on any other branch get a test tag and never touch :develop or :latest
+          slug="$(echo "$BRANCH" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-100)"
+          tags+=("$image:branch-${slug%-}")
         fi
 
-        echo "has_tags=true" >> "$GITHUB_OUTPUT"
         {
           echo 'tags<<EOF'
-          printf '%s\n' "${tags[@]}" | sort -u
+          printf '%s\n' "${tags[@]}"
           echo 'EOF'
         } >> "$GITHUB_OUTPUT"
 
     - name: Build and push Docker image
-      if: steps.docker-tags.outputs.has_tags == 'true'
       uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
       with:
         context: .
         file: ./Dockerfile.cross
-        platforms: linux/amd64,linux/arm64,linux/arm/v7
+        platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.docker-tags.outputs.tags }}
         labels: |
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          org.opencontainers.image.revision=${{ inputs.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+          org.opencontainers.image.revision=${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
+        # mode=max keeps the intermediate frontend/backend stages too, so a change
+        # on one side reuses the other side's build from cache.
+        cache-from: type=gha,scope=chaptarr-image
+        cache-to: type=gha,mode=max,scope=chaptarr-image
