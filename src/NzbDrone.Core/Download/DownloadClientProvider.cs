@@ -146,17 +146,19 @@ namespace NzbDrone.Core.Download
 
         private static string BuildNoMatchingProtocolMessage(DownloadProtocol requestedProtocol, List<IDownloadClient> enabledProviders)
         {
-            var requestedProtocolLabel = requestedProtocol.ToString().ToLowerInvariant();
-            var alternateProtocol = requestedProtocol == DownloadProtocol.Torrent ? DownloadProtocol.Usenet : DownloadProtocol.Torrent;
-            var alternateProtocolLabel = alternateProtocol.ToString().ToLowerInvariant();
-            var alternateClientCount = enabledProviders
-                .Count(v => v.Protocol == alternateProtocol);
-
-            var alternateClientsMessage = alternateClientCount > 0
-                ? $" Found {alternateClientCount} enabled {alternateProtocolLabel} client(s)."
-                : string.Empty;
+            var requestedProtocolLabel = GetProtocolLabel(requestedProtocol);
+            var alternateClientsMessage = string.Concat(enabledProviders
+                .Where(v => v.Protocol != requestedProtocol)
+                .GroupBy(v => v.Protocol)
+                .OrderBy(g => g.Key)
+                .Select(g => $" Found {g.Count()} enabled {GetProtocolLabel(g.Key)} client(s)."));
 
             return $"No enabled {requestedProtocolLabel} download client is configured.{alternateClientsMessage} Add and enable a {requestedProtocolLabel}-capable download client, then retry.";
+        }
+
+        private static string GetProtocolLabel(DownloadProtocol protocol)
+        {
+            return protocol == DownloadProtocol.DirectDownload ? "direct download" : protocol.ToString().ToLowerInvariant();
         }
 
         public IEnumerable<IDownloadClient> GetDownloadClients(bool filterBlockedClients = false)

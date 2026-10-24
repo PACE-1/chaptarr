@@ -9,7 +9,7 @@ import ModalContent from 'Components/Modal/ModalContent';
 import ModalFooter from 'Components/Modal/ModalFooter';
 import ModalHeader from 'Components/Modal/ModalHeader';
 import { kinds } from 'Helpers/Props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import AddDownloadClientItem from './AddDownloadClientItem';
 import styles from './AddDownloadClientModalContent.css';
@@ -26,11 +26,12 @@ class AddDownloadClientModalContent extends Component {
       schemaError,
       usenetDownloadClients,
       torrentDownloadClients,
+      directDownloadDownloadClients,
       onDownloadClientSelect,
       onModalClose
     } = this.props;
 
-    const implementationNameCounts = [...usenetDownloadClients, ...torrentDownloadClients].reduce((counts, client) => {
+    const implementationNameCounts = [...usenetDownloadClients, ...torrentDownloadClients, ...directDownloadDownloadClients].reduce((counts, client) => {
       const key = (client.implementationName || '').toLowerCase();
       counts[key] = (counts[key] || 0) + 1;
       return counts;
@@ -39,7 +40,7 @@ class AddDownloadClientModalContent extends Component {
     const getDisplayName = (client) => {
       const key = (client.implementationName || '').toLowerCase();
       if (implementationNameCounts[key] > 1) {
-        return `${client.implementationName} (${titleCase(client.protocol)})`;
+        return `${client.implementationName} (${getProtocolName(client.protocol)})`;
       }
 
       return client.implementationName;
@@ -112,6 +113,27 @@ class AddDownloadClientModalContent extends Component {
                     }
                   </div>
                 </FieldSet>
+
+                {
+                  directDownloadDownloadClients.length > 0 &&
+                    <FieldSet legend={translate('DirectDownload')}>
+                      <div className={styles.downloadClients}>
+                        {
+                          directDownloadDownloadClients.map((downloadClient) => {
+                            return (
+                              <AddDownloadClientItem
+                                key={downloadClient.implementation}
+                                implementation={downloadClient.implementation}
+                                {...downloadClient}
+                                implementationName={getDisplayName(downloadClient)}
+                                onDownloadClientSelect={onDownloadClientSelect}
+                              />
+                            );
+                          })
+                        }
+                      </div>
+                    </FieldSet>
+                }
               </div>
           }
         </ModalBody>
@@ -133,6 +155,7 @@ AddDownloadClientModalContent.propTypes = {
   schemaError: PropTypes.object,
   usenetDownloadClients: PropTypes.arrayOf(PropTypes.object).isRequired,
   torrentDownloadClients: PropTypes.arrayOf(PropTypes.object).isRequired,
+  directDownloadDownloadClients: PropTypes.arrayOf(PropTypes.object).isRequired,
   onDownloadClientSelect: PropTypes.func.isRequired,
   onModalClose: PropTypes.func.isRequired
 };

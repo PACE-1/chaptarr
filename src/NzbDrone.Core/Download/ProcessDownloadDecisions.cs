@@ -45,8 +45,7 @@ namespace NzbDrone.Core.Download
 
             var pendingAddQueue = new List<Tuple<DownloadDecision, PendingReleaseReason>>();
 
-            var usenetFailed = false;
-            var torrentFailed = false;
+            var failedProtocols = new HashSet<DownloadProtocol>();
 
             foreach (var report in prioritizedDecisions)
             {
@@ -64,8 +63,7 @@ namespace NzbDrone.Core.Download
                     continue;
                 }
 
-                if ((downloadProtocol == DownloadProtocol.Usenet && usenetFailed) ||
-                    (downloadProtocol == DownloadProtocol.Torrent && torrentFailed))
+                if (failedProtocols.Contains(downloadProtocol))
                 {
                     PreparePending(pendingAddQueue, grabbed, pending, report, PendingReleaseReason.DownloadClientUnavailable);
                     continue;
@@ -97,14 +95,7 @@ namespace NzbDrone.Core.Download
                         {
                             PreparePending(pendingAddQueue, grabbed, pending, report, PendingReleaseReason.DownloadClientUnavailable);
 
-                            if (downloadProtocol == DownloadProtocol.Usenet)
-                            {
-                                usenetFailed = true;
-                            }
-                            else if (downloadProtocol == DownloadProtocol.Torrent)
-                            {
-                                torrentFailed = true;
-                            }
+                            failedProtocols.Add(downloadProtocol);
 
                             break;
                         }

@@ -82,6 +82,9 @@ class DelayProfiles extends Component {
               <div className={styles.column}>
                 {translate('TorrentDelay')}
               </div>
+              <div className={styles.column}>
+                {translate('DirectDownloadDelay')}
+              </div>
               <div className={styles.tags}>
                 {translate('Tags')}
               </div>

@@ -5,26 +5,69 @@ import { connect } from 'react-redux';
 import { createSelector } from 'reselect';
 import { saveDelayProfile, setDelayProfileValue } from 'Store/Actions/settingsActions';
 import selectSettings from 'Store/Selectors/selectSettings';
+import translate from 'Utilities/String/translate';
 import EditDelayProfileModalContent from './EditDelayProfileModalContent';
 
 const newDelayProfile = {
   enableUsenet: true,
   enableTorrent: true,
+  enableDirectDownload: true,
   preferredProtocol: 'usenet',
   usenetDelay: 0,
   torrentDelay: 0,
+  directDownloadDelay: 0,
   bypassIfHighestQuality: false,
   bypassIfAboveCustomFormatScore: false,
   minimumCustomFormatScore: 0,
   tags: []
 };
 
-const protocolOptions = [
-  { key: 'preferUsenet', value: 'Prefer Usenet' },
-  { key: 'preferTorrent', value: 'Prefer Torrent' },
-  { key: 'onlyUsenet', value: 'Only Usenet' },
-  { key: 'onlyTorrent', value: 'Only Torrent' }
+const protocols = [
+  { key: 'usenet', enableField: 'enableUsenet', labelKey: 'Usenet' },
+  { key: 'torrent', enableField: 'enableTorrent', labelKey: 'Torrent' },
+  { key: 'directDownload', enableField: 'enableDirectDownload', labelKey: 'DirectDownload' }
 ];
+
+const enableFields = protocols.map((p) => p.enableField);
+
+function getFieldValue(item, name) {
+  const field = item[name];
+
+  return field ? field.value : undefined;
+}
+
+// enableDirectDownload may be missing/null on profiles created before
+// direct download support existed; treat that as enabled.
+function isProtocolEnabled(item, enableField) {
+  const value = getFieldValue(item, enableField);
+
+  if (enableField === 'enableDirectDownload') {
+    return value !== false;
+  }
+
+  return !!value;
+}
+
+function getEnabledProtocols(item) {
+  return protocols.filter((p) => isProtocolEnabled(item, p.enableField)).map((p) => p.key);
+}
+
+function getEffectivePreferredProtocol(preferredProtocol, enabledProtocols) {
+  if (enabledProtocols.includes(preferredProtocol)) {
+    return preferredProtocol;
+  }
+
+  return enabledProtocols.length ? enabledProtocols[0] : preferredProtocol;
+}
+
+function wrapField(field, value) {
+  return {
+    errors: [],
+    warnings: [],
+    ...field,
+    value
+  };
+}
 
 function createDelayProfileSelector() {
   return createSelector(
@@ -60,29 +103,29 @@ function createMapStateToProps() {
   return createSelector(
     createDelayProfileSelector(),
     (delayProfile) => {
-      const enableUsenet = delayProfile.item.enableUsenet.value;
-      const enableTorrent = delayProfile.item.enableTorrent.value;
-      const preferredProtocol = delayProfile.item.preferredProtocol.value;
-      let protocol = 'preferUsenet';
+      const item = delayProfile.item;
+      const enabledProtocols = getEnabledProtocols(item);
+      const preferredProtocol = getEffectivePreferredProtocol(
+        getFieldValue(item, 'preferredProtocol'),
+        enabledProtocols
+      );
 
-      if (preferredProtocol === 'usenet') {
-        protocol = 'preferUsenet';
-      } else {
-        protocol = 'preferTorrent';
-      }
+      const directDownloadDelay = getFieldValue(item, 'directDownloadDelay');
 
-      if (!enableUsenet) {
-        protocol = 'onlyTorrent';
-      }
-
-      if (!enableTorrent) {
-        protocol = 'onlyUsenet';
-      }
+      const preferredProtocolOptions = protocols
+        .filter((p) => enabledProtocols.includes(p.key))
+        .map((p) => ({ key: p.key, value: translate(p.labelKey) }));
 
       return {
-        protocol,
-        protocolOptions,
-        ...delayProfile
+        ...delayProfile,
+        item: {
+          ...item,
+          enableDirectDownload: wrapField(item.enableDirectDownload, isProtocolEnabled(item, 'enableDirectDownload')),
+          directDownloadDelay: wrapField(item.directDownloadDelay, directDownloadDelay == null ? 0 : directDownloadDelay),
+          preferredProtocol: wrapField(item.preferredProtocol, preferredProtocol)
+        },
+        enabledProtocols,
+        preferredProtocolOptions
       };
     }
   );
@@ -120,32 +163,23 @@ class EditDelayProfileModalContentConnector extends Component {
 
   onInputChange = ({ name, value }) => {
     this.props.setDelayProfileValue({ name, value });
-  };
 
-  onProtocolChange = ({ value }) => {
-    switch (value) {
-      case 'preferUsenet':
-        this.props.setDelayProfileValue({ name: 'enableUsenet', value: true });
-        this.props.setDelayProfileValue({ name: 'enableTorrent', value: true });
-        this.props.setDelayProfileValue({ name: 'preferredProtocol', value: 'usenet' });
-        break;
-      case 'preferTorrent':
-        this.props.setDelayProfileValue({ name: 'enableUsenet', value: true });
-        this.props.setDelayProfileValue({ name: 'enableTorrent', value: true });
-        this.props.setDelayProfileValue({ name: 'preferredProtocol', value: 'torrent' });
-        break;
-      case 'onlyUsenet':
-        this.props.setDelayProfileValue({ name: 'enableUsenet', value: true });
-        this.props.setDelayProfileValue({ name: 'enableTorrent', value: false });
-        this.props.setDelayProfileValue({ name: 'preferredProtocol', value: 'usenet' });
-        break;
-      case 'onlyTorrent':
-        this.props.setDelayProfileValue({ name: 'enableUsenet', value: false });
-        this.props.setDelayProfileValue({ name: 'enableTorrent', value: true });
-        this.props.setDelayProfileValue({ name: 'preferredProtocol', value: 'torrent' });
-        break;
-      default:
-        throw Error(`Unknown protocol option: ${value}`);
+    if (!enableFields.includes(name)) {
+      return;
+    }
+
+    // Keep the preferred protocol pointing at an enabled protocol.
+    const item = {
+      ...this.props.item,
+      [name]: { value }
+    };
+
+    const enabledProtocols = getEnabledProtocols(item);
+    const currentPreferred = getFieldValue(item, 'preferredProtocol');
+    const preferredProtocol = getEffectivePreferredProtocol(currentPreferred, enabledProtocols);
+
+    if (preferredProtocol !== currentPreferred) {
+      this.props.setDelayProfileValue({ name: 'preferredProtocol', value: preferredProtocol });
     }
   };
 
@@ -162,7 +196,6 @@ class EditDelayProfileModalContentConnector extends Component {
         {...this.props}
         onSavePress={this.onSavePress}
         onInputChange={this.onInputChange}
-        onProtocolChange={this.onProtocolChange}
       />
     );
   }

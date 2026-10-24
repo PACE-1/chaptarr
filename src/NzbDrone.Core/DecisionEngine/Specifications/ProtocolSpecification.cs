@@ -28,16 +28,14 @@ namespace NzbDrone.Core.DecisionEngine.Specifications
             var tags = subject.Author.GetTagsForMediaType(mediaType);
             var delayProfile = _delayProfileService.BestForTags(tags);
 
-            if (subject.Release.DownloadProtocol == DownloadProtocol.Usenet && !delayProfile.EnableUsenet)
-            {
-                _logger.Trace("[{0}] Usenet is not enabled for this author", subject.Release.Title);
-                return Decision.Reject("Usenet is not enabled for this author");
-            }
+            var protocol = subject.Release.DownloadProtocol;
 
-            if (subject.Release.DownloadProtocol == DownloadProtocol.Torrent && !delayProfile.EnableTorrent)
+            if (!delayProfile.IsProtocolEnabled(protocol))
             {
-                _logger.Trace("[{0}] Torrent is not enabled for this author", subject.Release.Title);
-                return Decision.Reject("Torrent is not enabled for this author");
+                var label = protocol == DownloadProtocol.DirectDownload ? "Direct download" : protocol.ToString();
+
+                _logger.Trace("[{0}] {1} is not enabled for this author", subject.Release.Title, label);
+                return Decision.Reject($"{label} is not enabled for this author");
             }
 
             return Decision.Accept();

@@ -19,7 +19,7 @@ import ModalFooter from 'Components/Modal/ModalFooter';
 import ModalHeader from 'Components/Modal/ModalHeader';
 import { icons, inputTypes, kinds, sizes } from 'Helpers/Props';
 import AdvancedSettingsButton from 'Settings/AdvancedSettingsButton';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import styles from './EditDownloadClientModalContent.css';
 
@@ -309,7 +309,7 @@ class EditDownloadClientModalContent extends Component {
                   <FormInputGroup
                     type={inputTypes.TEXT}
                     name="protocolDisplay"
-                    value={protocol && protocol.value ? titleCase(protocol.value) : ''}
+                    value={protocol && protocol.value ? getProtocolName(protocol.value) : ''}
                     readOnly={true}
                     onChange={onInputChange}
                   />
