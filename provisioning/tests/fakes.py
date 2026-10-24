@@ -309,12 +309,40 @@ class FakeAbs(FakeServer):
             self.libraries.append(lib)
             return 200, lib
 
+        @self.route("GET", r"/api/plugins")
+        def plugins(m, b, q):
+            return 200, {"plugins": [self.plugin_json()], "inventory": []}
+
         @self.route("PATCH", r"/api/plugins/chaptarr/settings")
         def settings(m, b, q):
-            if not isinstance(b.get("userProfiles"), str):
+            # Mirrors validateSettings(manifest, values, previous, patch=true) in ABS: start from the
+            # previous settings, reject unknown keys, keep a secret when the patch sends ''.
+            if "userProfiles" in b and not isinstance(b.get("userProfiles"), str):
                 return 400, {"error": "userProfiles must be a string"}
-            self.settings.update(b)
-            return 200, {"success": True}
+            schema = {f["key"]: f for f in self.plugin_schema}
+            for key in b:
+                if key != "enabled" and key not in schema:
+                    return 400, {"error": f"Unknown settings key {key}"}
+            nxt = {} if self.replace_settings else dict(self.settings)
+            for key, value in b.items():
+                if not (schema.get(key, {}).get("secret") and value == ""):
+                    nxt[key] = value
+            self.settings = nxt
+            return 200, {"plugin": self.plugin_json(), "restartRequired": False}
+
+    plugin_schema = [
+        {"key": "url", "type": "text"}, {"key": "apiKey", "type": "text", "secret": True},
+        {"key": "username", "type": "text"}, {"key": "password", "type": "text", "secret": True},
+        {"key": "userProfiles", "type": "password", "secret": True}, {"key": "provisionerUrl", "type": "text"},
+        {"key": "provisionerToken", "type": "text", "secret": True},
+    ]
+    replace_settings = False
+
+    def plugin_json(self) -> dict:
+        secret = {f["key"] for f in self.plugin_schema if f.get("secret")}
+        return {"id": "chaptarr", "settingsSchema": self.plugin_schema,
+                "settings": {k: v for k, v in self.settings.items() if k not in secret},
+                "secretsSet": {k: bool(v) for k, v in self.settings.items() if k in secret}}
 
     def profiles(self) -> dict:
         return json.loads(self.settings.get("userProfiles") or "{}")
@@ -342,10 +370,9 @@ class FakeDocker:
             project = args[args.index("-p") + 1]
             action = args[args.index("-p") + 2]
             if action == "up":
-                env = Path(cwd, ".env").read_text()
-                api_key = env.strip().split("=", 1)[1]
-                if self.instance is not None:
-                    self.instance.api_key = api_key
+                env_file = Path(cwd, ".env")
+                if env_file.exists() and self.instance is not None:
+                    self.instance.api_key = env_file.read_text().strip().split("=", 1)[1]
                 self.containers.add(project)
             elif action == "down":
                 self.containers.discard(project)
