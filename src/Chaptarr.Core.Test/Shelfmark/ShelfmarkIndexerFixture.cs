@@ -158,6 +158,21 @@ namespace Chaptarr.Core.Test.Shelfmark
             Assert.That(requests[0].HttpRequest.RequestTimeout.TotalSeconds, Is.EqualTo(120));
         }
 
+        [TestCase("Frankenstein (Pulp! The Classics)", "title=Frankenstein&")]
+        [TestCase("Project Hail Mary: A Novel", "title=Project%20Hail%20Mary&")]
+        [TestCase("Andy Weir: Project Hail Mary", "title=Project%20Hail%20Mary&")]
+        public void should_search_by_the_main_title(string bookTitle, string expected)
+        {
+            var criteria = new BookSearchCriteria
+            {
+                Author = new Author { Name = "Andy Weir" },
+                BookTitle = bookTitle,
+                Books = new List<Book> { new Book { Id = 12, Title = bookTitle, MediaType = BookMediaType.Ebook } }
+            };
+
+            Assert.That(Requests(criteria).Single().Url.FullUri, Does.Contain(expected));
+        }
+
         [Test]
         public void should_search_each_configured_source_and_by_hardcover_id_when_enabled()
         {

@@ -58,6 +58,11 @@ namespace NzbDrone.Core.Indexers.Shelfmark
                 yield break;
             }
 
+            // Search the main title only: edition and series suffixes like "(Pulp! The Classics)" or
+            // ": A Novel" make Shelfmark's sources miss releases that name just the book.
+            var mainTitle = BookSearchCriteria.GetMainSearchTitle(title, author);
+            title = mainTitle.IsNotNullOrWhiteSpace() ? mainTitle : title;
+
             var contentTypes = mediaType.HasValue
                 ? new[] { ToContentType(mediaType.Value) }
                 : new[] { "ebook", "audiobook" };
