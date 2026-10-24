@@ -41,6 +41,13 @@ jobs:
         ref: ${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
         fetch-depth: 0
 
+    # Only the runtime stage (apt packages, tool version checks) runs as arm64 under
+    # emulation; the .NET and UI builds cross-compile on the amd64 build platform.
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      with:
+        platforms: arm64
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
@@ -99,5 +106,7 @@ jobs:
         labels: |
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           org.opencontainers.image.revision=${{ inputs.sha || github.event.workflow_run.head_sha || github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # mode=max keeps the intermediate frontend/backend stages too, so a change
+        # on one side reuses the other side's build from cache.
+        cache-from: type=gha,scope=chaptarr-image
+        cache-to: type=gha,mode=max,scope=chaptarr-image

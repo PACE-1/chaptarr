@@ -26,19 +26,29 @@ COPY package.json yarn.lock ./
 RUN --mount=type=cache,target=/root/.cache/yarn \
     yarn install --frozen-lockfile
 
-###### build stage ######
-FROM --platform=$BUILDPLATFORM deps AS build
+###### frontend stage ######
+# Native build platform; the UI is architecture-independent, so BuildKit runs it
+# once and shares it between both target platforms. Only frontend inputs are
+# copied, so a backend-only change reuses this layer from cache.
+FROM --platform=$BUILDPLATFORM deps AS frontend
 WORKDIR /src
-
-# Bring in the rest of the project *after* deps are installed
-COPY . .
-
-# Front‑end build (architecture-independent)
+COPY frontend ./frontend
 RUN yarn typecheck
 RUN yarn build
 
+###### backend stage ######
+# Cross-compiles on the native build platform (no QEMU) for the target RID. Only
+# backend inputs are copied (src, the Tools bundled by Chaptarr.Host, and
+# .editorconfig, which feeds diagnostic severities under TreatWarningsAsErrors),
+# so a frontend-only change reuses this layer from cache.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS backend
+WORKDIR /src
+COPY .editorconfig ./
+COPY Tools ./Tools
+COPY src ./src
+
 # Build for the target architecture only. When building multi-platform images with Buildx,
-# Docker runs this Dockerfile once per target platform, so producing *all* arch outputs here
+# Docker runs this stage once per target platform, so producing *all* arch outputs here
 # just bloats every final image layer.
 ARG TARGETPLATFORM
 RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
@@ -51,9 +61,6 @@ RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
     esac; \
     dotnet restore src/Chaptarr.NoTests.sln -r "$RUNTIME_ID"; \
     dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -r "$RUNTIME_ID" --self-contained false -o /app --no-restore /p:EnableWindowsTargeting=true /p:RunAnalyzersDuringBuild=false /p:RunCodeAnalysis=false /p:PublishSingleFile=false
-
-# Copy UI output to app directory
-RUN mkdir -p /app/UI && cp -r _output/UI/* /app/UI/
 
 ###### runtime stage ######
 # This stage runs on the target platform
@@ -109,10 +116,10 @@ RUN chmod +x /entrypoint.sh
 
 WORKDIR /app
 
-COPY --from=build /app /app
-
-# Set app permissions at build time
-RUN chmod -R 755 /app
+# Set app permissions as part of the copy. A separate `RUN chmod -R` would run
+# under QEMU on arm64 and duplicate every app file into a second layer.
+COPY --from=backend --chmod=755 /app /app
+COPY --from=frontend --chmod=755 /src/_output/UI /app/UI
 
 EXPOSE 8789
 ENTRYPOINT ["/entrypoint.sh"]
