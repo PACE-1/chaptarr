@@ -181,11 +181,37 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [ guards, backend, frontend, postgres-migrations ]
     runs-on: docker
+    # Needs the runner to allow this volume (container.valid_volumes); see FORK.md.
+    container:
+      image: node:lts-trixie
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
     env:
       REGISTRY: git.banditserver.com
       IMAGE: git.banditserver.com/${{ github.repository_owner }}/chaptarr
     steps:
     - uses: actions/checkout@v4
+
+    # The runner's job image (node:lts-*) has no Docker CLI; it only needs the host's
+    # Docker socket mounted into job containers.
+    - name: Install Docker CLI and buildx
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! -S /var/run/docker.sock ]]; then
+          echo "::error::/var/run/docker.sock is not mounted into the job container. Add /var/run/docker.sock to the runner's container.valid_volumes (see FORK.md)."
+          exit 1
+        fi
+        if ! command -v docker >/dev/null; then
+          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
+        fi
+        mkdir -p ~/.docker/cli-plugins
+        if ! docker buildx version >/dev/null 2>&1; then
+          curl -fsSL -o ~/.docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64
+          chmod +x ~/.docker/cli-plugins/docker-buildx
+        fi
+        docker version
+        docker buildx version
 
     - name: Log in to the Forgejo registry
       shell: bash

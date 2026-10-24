@@ -26,3 +26,4 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 - A `v*` tag (or a manual run) publishes `git.banditserver.com/<owner>/chaptarr` for linux/amd64 after every check passes.
 - The in-app update check reads releases from `PACE-1/chaptarr`, never from upstream.
 - Every change is verified on **librarytest** before it is promoted to prod.
+- The `image` job runs on the `docker` label and mounts `/var/run/docker.sock` into its job container. The runner config must list it, e.g. `container: valid_volumes: ["/var/run/docker.sock"]` in act_runner's `config.yaml`. Otherwise the job fails with a message saying so.
