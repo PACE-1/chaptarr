@@ -199,8 +199,12 @@ jobs:
         tags=(-t "$IMAGE:sha-$sha")
         if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
           tags+=(-t "$IMAGE:${GITHUB_REF_NAME#v}" -t "$IMAGE:latest")
-        else
+        elif [[ "$GITHUB_REF_NAME" == develop ]]; then
           tags+=(-t "$IMAGE:develop")
+        else
+          # Manual runs on any other branch get a test tag and never touch :develop or :latest
+          slug="$(echo "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-100)"
+          tags+=(-t "$IMAGE:branch-${slug%-}")
         fi
         docker buildx build --platform linux/amd64 -f Dockerfile.cross \
           --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \

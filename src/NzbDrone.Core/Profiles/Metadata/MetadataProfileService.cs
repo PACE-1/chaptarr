@@ -601,6 +601,14 @@ namespace NzbDrone.Core.Profiles.Metadata
                 return true;
             }
 
+            // SeriesBookLink rows are often sparse, or hold a tidied-up position, while the book itself
+            // still carries what the metadata provider returned - "3, Part 1 of 2", "2A", "2 Part B".
+            // A position that is not a number means this record is one slice of a work, not the work.
+            if (book.SeriesPosition.IsNotNullOrWhiteSpace() && !IsNonBundleSeriesPosition(book.SeriesPosition))
+            {
+                return true;
+            }
+
             // Skip things of form Title1 / Title2 when Title1 and Title2 are already in the list
             var bookTitles = new[] { book.Title }.Concat(book.Editions.Select(x => x.Title)).ToList();
             foreach (var title in bookTitles)

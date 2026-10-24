@@ -142,7 +142,7 @@ class AddNewAuthorSearchResult extends Component {
                   {authorName}
 
                   {
-                    !authorName.contains(year) && year ?
+                    !!year && !String(authorName ?? '').includes(String(year)) ?
                       <span className={styles.year}>
                         ({year})
                       </span> :

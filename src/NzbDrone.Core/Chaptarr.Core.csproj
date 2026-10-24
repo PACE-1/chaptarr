@@ -24,11 +24,12 @@
     <PackageReference Include="RestSharp" />
     <PackageReference Include="System.IO.Abstractions" />
     <PackageReference Include="TagLibSharp-Lidarr" />
-    <PackageReference Include="SixLabors.ImageSharp" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <PackageReference Include="Equ" />
     <PackageReference Include="MonoTorrent" />
-    <PackageReference Include="PdfSharpCore" />
+    <PackageReference Include="PdfPig" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
   </ItemGroup>
