@@ -12,7 +12,50 @@ chaptarr-provision status alice
 chaptarr-provision delete alice [--purge]
 chaptarr-provision import-profiles current-profiles.json   # or - for stdin
 chaptarr-provision serve [--listen 0.0.0.0:8790]
+chaptarr-provision discover [--abs-container NAME] [--template SLUG] [--write PATH] [--import-profiles]
+chaptarr-provision install-service --abs-api-key-file FILE [--image IMAGE]
 ```
+
+## Quickstart (zero manual config)
+
+Run these as root on the Docker host, with ABS, the Chaptarr plugin and an existing Chaptarr
+already running:
+
+```
+sudo ./chaptarr_provision.py discover --write /etc/chaptarr-provision/config.toml --import-profiles
+sudo ./chaptarr_provision.py install-service --abs-api-key-file /root/abs-admin-key
+```
+
+Then open **Settings > Plugins > Chaptarr > Users** in ABS and click **Create private Chaptarr**.
+
+`discover` reads `docker inspect`, the plugin's settings file, the template Chaptarr's
+`config.xml` and its SQLite database (read-only). It writes a complete config with mode 0600,
+then prints what it found and every assumption it made. Read the **WARNINGS** block: the most
+common one is a missing ABS mount for the new users' folders, and the warning gives the exact
+compose line to add. Without `--write`, the config is printed with its secrets redacted.
+`install-service` generates the serve token, starts `chaptarr-provisioner` on the ABS network
+(no published ports), waits for `/v1/health`, then sets `provisionerUrl` and `provisionerToken`
+in the plugin. Both commands are safe to re-run.
+
+### What `discover` infers, and how
+
+| setting | source |
+|---|---|
+| ABS container | `--abs-container`, or the only running container whose image or name contains `audiobookshelf` |
+| `docker.network` | the ABS container's first network |
+| existing profiles, shared `url`, whether `provisionerUrl` is set | `<ABS /config>/plugins/.state/chaptarr/settings.json` (unmasked on disk) |
+| template Chaptarr | `--template`, else the container behind the plugin's shared `url`, else the first profile's container (hostnames are matched against container names and network aliases) |
+| template API key | its `Chaptarr__Auth__ApiKey` env, else `<ApiKey>` in `<its /config>/config.xml` |
+| image, PUID/PGID/TZ/UMASK | the template container |
+| path templates | The template's root folders (from its profile, or from its `RootFolders` table), mapped through its mounts to host paths. The owner's username or slug in a path becomes `{slug}`. A path with no owner name is shared, so each user gets a sibling folder, `<path>-{slug}`. |
+| ABS-side paths | the per-user host path mapped through the ABS container's mounts |
+| downloads | A mount whose destination contains `download`. If it is shared, it becomes an extra volume and each user gets `<it>/chaptarr-{slug}`. Other bind mounts become `extra_volumes`. |
+| download clients, remote path mappings, indexer secrets | the `DownloadClients`, `RemotePathMappings` and `Indexers` tables of `chaptarr.db`, opened with `mode=ro`. Secret fields are the ones the template API masks, or are picked by field name when the API cannot be reached. |
+| Prowlarr | A running Prowlarr container on the ABS network that has an application pointing at the template. Its key comes from its `config.xml`. |
+
+It cannot infer the ABS admin API key, which `install-service` takes as a file. Nor can it
+read secrets when the template runs on PostgreSQL: it then writes `CHANGE-ME` placeholders and
+lists them.
 
 ## What `create` does
 

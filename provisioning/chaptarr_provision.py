@@ -867,16 +867,9 @@ class Provisioner:
         return self.public_state(state)
 
     def import_profiles(self, text: str) -> dict:
-        incoming = parse_profiles_input(text)
-        with self.store.lock("_profiles"):
-            merged = self.store.load_profiles()
-            added = [k for k in incoming if k not in merged]
-            updated = [k for k in incoming if k in merged and merged[k] != incoming[k]]
-            merged.update(incoming)
-            self.store.save_profiles(merged)
-        for prof in incoming.values():
+        for prof in parse_profiles_input(text).values():
             self.masker.add(prof.get("apiKey"))
-        return {"imported": len(incoming), "added": sorted(added), "updated": sorted(updated), "total": len(merged)}
+        return import_profiles_into(self.store, text)
 
     def delete(self, slug: str, purge: bool = False) -> dict:
         validate_slug(slug)
@@ -1743,6 +1736,923 @@ def make_server(provisioner: Provisioner, listen: str, token: str | None) -> htt
     return server
 
 
+# --------------------------------------------------------------------------- discover
+
+
+REDACTED = "<redacted>"
+DEFAULT_CONFIG_DIR = "/etc/chaptarr-provision"
+PROVISIONER_NAME = "chaptarr-provisioner"
+PROVISIONER_PORT = 8790
+DEFAULT_PROVISIONER_IMAGE = "ghcr.io/pace-1/chaptarr-provisioner:develop"
+# Provider field names that hold secrets, used when the template API cannot tell us which
+# fields it masks. Category fields are never secrets.
+SECRET_FIELD_RE = re.compile(r"(?i)(pass(word)?|api_?key|token|secret|cookie|mam_?id|session|seed)$")
+
+
+class DiscoveryError(ProvisionError):
+    pass
+
+
+def toml_dumps(data: dict) -> str:
+    """Serialize the config shapes chaptarr-provision uses (tables, arrays of tables, scalars)."""
+
+    def key(k: str) -> str:
+        return k if re.match(r"^[A-Za-z0-9_-]+$", k) else json.dumps(k)
+
+    def scalar(v: Any) -> str:
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if isinstance(v, list):
+            return "[" + ", ".join(scalar(x) for x in v) + "]"
+        if isinstance(v, dict):
+            return "{ " + ", ".join(f"{key(k)} = {scalar(x)}" for k, x in v.items()) + " }"
+        return json.dumps(str(v))
+
+    def is_table_array(v: Any) -> bool:
+        return isinstance(v, list) and bool(v) and all(isinstance(x, dict) for x in v)
+
+    lines: list[str] = []
+
+    def body(path: list[str], table: dict) -> None:
+        for k, v in table.items():
+            if v is None or isinstance(v, dict) or is_table_array(v):
+                continue
+            lines.append(f"{key(k)} = {scalar(v)}")
+        for k, v in table.items():
+            if isinstance(v, dict):
+                lines.append("")
+                lines.append("[" + ".".join(key(p) for p in path + [k]) + "]")
+                body(path + [k], v)
+            elif is_table_array(v):
+                for item in v:
+                    lines.append("")
+                    lines.append("[[" + ".".join(key(p) for p in path + [k]) + "]]")
+                    body(path + [k], item)
+
+    body([], data)
+    return "\n".join(lines).strip() + "\n"
+
+
+def redact(value: Any, secret_values: set[str]) -> Any:
+    if isinstance(value, dict):
+        return {k: redact(v, secret_values) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v, secret_values) for v in value]
+    if isinstance(value, str) and value in secret_values:
+        return REDACTED
+    return value
+
+
+def read_xml_tag(path: Path, tag: str) -> str | None:
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    m = re.search(rf"<{tag}>\s*([^<]*?)\s*</{tag}>", text)
+    return m.group(1) if m and m.group(1) else None
+
+
+def sqlite_rows(db: Path, query: str) -> list[dict]:
+    import sqlite3
+
+    uri = "file:" + urllib.parse.quote(str(db)) + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(query).fetchall()]
+    finally:
+        conn.close()
+
+
+class Container:
+    """Read-only view over one `docker inspect` object."""
+
+    def __init__(self, raw: dict):
+        self.raw = raw
+
+    @property
+    def name(self) -> str:
+        return str(self.raw.get("Name", "")).lstrip("/")
+
+    @property
+    def id(self) -> str:
+        return str(self.raw.get("Id", ""))
+
+    @property
+    def image(self) -> str:
+        return str((self.raw.get("Config") or {}).get("Image", ""))
+
+    @property
+    def env(self) -> dict:
+        out = {}
+        for item in (self.raw.get("Config") or {}).get("Env") or []:
+            k, _, v = str(item).partition("=")
+            out[k] = v
+        return out
+
+    @property
+    def labels(self) -> dict:
+        return (self.raw.get("Config") or {}).get("Labels") or {}
+
+    @property
+    def networks(self) -> dict:
+        return (self.raw.get("NetworkSettings") or {}).get("Networks") or {}
+
+    @property
+    def mounts(self) -> list[dict]:
+        return list(self.raw.get("Mounts") or [])
+
+    def dns_names(self) -> set[str]:
+        names = {self.name.lower(), self.id[:12].lower()}
+        hostname = (self.raw.get("Config") or {}).get("Hostname")
+        if hostname:
+            names.add(str(hostname).lower())
+        for net in self.networks.values():
+            for alias in (net.get("Aliases") or []) + (net.get("DNSNames") or []):
+                names.add(str(alias).lower())
+        names.discard("")
+        return names
+
+    def ip(self, network: str | None = None) -> str | None:
+        nets = self.networks
+        if network and network in nets and nets[network].get("IPAddress"):
+            return nets[network]["IPAddress"]
+        for net in nets.values():
+            if net.get("IPAddress"):
+                return net["IPAddress"]
+        return None
+
+    def mount_at(self, container_path: str) -> tuple[dict, str] | None:
+        """The mount whose destination is the longest prefix of ``container_path``, plus the rest."""
+        best = None
+        cp_ = norm_path(container_path)
+        for m in self.mounts:
+            dest = norm_path(str(m.get("Destination", "")))
+            if cp_ == dest or cp_.startswith(dest.rstrip("/") + "/"):
+                if best is None or len(dest) > len(norm_path(best["Destination"])):
+                    best = m
+        if best is None:
+            return None
+        rest = cp_[len(norm_path(best["Destination"])):].lstrip("/")
+        return best, rest
+
+    def host_path(self, container_path: str) -> str | None:
+        found = self.mount_at(container_path)
+        if not found or found[0].get("Type", "bind") != "bind":
+            return None
+        mount, rest = found
+        return norm_path(str(mount["Source"]).rstrip("/") + ("/" + rest if rest else ""))
+
+    def container_path_for_host(self, host_path: str) -> str | None:
+        """Map a host path into this container through its bind mounts (longest source wins)."""
+        best = None
+        hp = norm_path(host_path)
+        for m in self.mounts:
+            if m.get("Type", "bind") != "bind":
+                continue
+            src = norm_path(str(m.get("Source", "")))
+            if hp == src or hp.startswith(src.rstrip("/") + "/"):
+                if best is None or len(src) > len(norm_path(best["Source"])):
+                    best = m
+        if best is None:
+            return None
+        rest = hp[len(norm_path(best["Source"])):].lstrip("/")
+        return norm_path(str(best["Destination"]).rstrip("/") + ("/" + rest if rest else ""))
+
+
+def list_containers(docker: DockerRunner) -> list[Container]:
+    ids = docker.run(["ps", "-q", "--no-trunc"]).stdout.split()
+    if not ids:
+        return []
+    raw = json.loads(docker.run(["inspect", *ids]).stdout or "[]")
+    return [Container(c) for c in raw if (c.get("State") or {}).get("Running", True)]
+
+
+def templatize(path: str, tokens: list[str]) -> str | None:
+    """Replace the template owner's slug/username inside ``path`` with ``{slug}``.
+
+    Returns None when no token occurs (the path is not per-user).
+    """
+    out = []
+    hit = False
+    for part in path.split("/"):
+        new = part
+        for tok in tokens:
+            if len(tok) >= 2:
+                pattern = re.compile(re.escape(tok), re.IGNORECASE)
+                if pattern.search(new):
+                    new = pattern.sub("{slug}", new)
+                    hit = True
+                    break
+        out.append(new)
+    return "/".join(out) if hit else None
+
+
+def sibling_template(host_path: str) -> str:
+    """For a shared (not per-user) folder, place each user's copy next to it: <dir>/<name>-{slug}."""
+    parent, _, base = norm_path(host_path).rpartition("/")
+    return f"{parent}/{base}-{{slug}}" if base else "/{slug}"
+
+
+def static_prefix(template: str) -> str:
+    """The deepest directory of a path template that contains no placeholder."""
+    if "{" not in template:
+        return norm_path(template)
+    return norm_path(template.split("{", 1)[0].rpartition("/")[0] or "/")
+
+
+class Discovery:
+    """Inspects the Docker host and builds a complete config for chaptarr-provision."""
+
+    def __init__(self, docker: DockerRunner, http: HttpClient | None = None, abs_container: str | None = None,
+                 template: str | None = None, config_dir: str = DEFAULT_CONFIG_DIR):
+        self.docker = docker
+        self.http = http or HttpClient(10)
+        self.abs_container_arg = abs_container
+        self.template_arg = template
+        self.config_dir = config_dir.rstrip("/")
+        self.notes: list[str] = []
+        self.warnings: list[str] = []
+        self.secret_values: set[str] = set()
+        self.profiles_text: str | None = None
+        self._abs_mount_warned: set[str] = set()
+
+    def note(self, text: str) -> None:
+        self.notes.append(text)
+
+    def warn(self, text: str) -> None:
+        self.warnings.append(text)
+
+    def secret(self, value: Any) -> Any:
+        if isinstance(value, str) and value:
+            self.secret_values.add(value)
+        return value
+
+    # ---- containers
+
+    def find_abs(self, containers: list[Container]) -> Container:
+        if self.abs_container_arg:
+            wanted = self.abs_container_arg.lower()
+            for c in containers:
+                if c.name.lower() == wanted or c.id.startswith(wanted):
+                    return c
+            raise DiscoveryError(f"no running container named {self.abs_container_arg!r}")
+        found = [c for c in containers if "audiobookshelf" in c.image.lower() or "audiobookshelf" in c.name.lower()]
+        if not found:
+            names = ", ".join(sorted(c.name for c in containers)) or "none"
+            raise DiscoveryError(f"no running Audiobookshelf container found (running: {names}); pass --abs-container")
+        if len(found) > 1:
+            names = ", ".join(f"{c.name} ({c.image})" for c in found)
+            raise DiscoveryError(f"several Audiobookshelf containers match: {names}; pass --abs-container NAME")
+        return found[0]
+
+    def by_hostname(self, containers: list[Container], url: str) -> Container | None:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if not host:
+            return None
+        for c in containers:
+            if host in c.dns_names():
+                return c
+        for c in containers:  # an IP address in the profile
+            if host in {str(n.get("IPAddress", "")) for n in c.networks.values()}:
+                return c
+        return None
+
+    # ---- main
+
+    def run(self) -> dict:
+        containers = list_containers(self.docker)
+        abs_c = self.find_abs(containers)
+        self.note(f"Audiobookshelf container: {abs_c.name} ({abs_c.image})")
+
+        nets = list(abs_c.networks)
+        if not nets:
+            raise DiscoveryError(f"{abs_c.name} is not on any Docker network")
+        network = nets[0]
+        if len(nets) > 1:
+            self.note(f"ABS is on several networks ({', '.join(nets)}); using the first: {network}")
+        if network in ("bridge", "host", "none"):
+            self.warn(f"ABS uses the {network!r} network, which has no container DNS. Put ABS on a user-defined "
+                      "network so it can reach chaptarr-<slug> by name.")
+
+        abs_config = abs_c.host_path("/config")
+        if not abs_config:
+            raise DiscoveryError(f"{abs_c.name} has no bind mount at /config, so its plugin settings cannot be read")
+        self.note(f"ABS config folder on the host: {abs_config}")
+
+        settings = self.read_abs_settings(Path(abs_config))
+        profiles = settings["profiles"]
+        abs_port = abs_c.env.get("PORT") or "80"
+        abs_url = f"http://{abs_c.name}:{abs_port}"
+
+        template_c, owner_id = self.choose_template(containers, settings)
+        template_url = f"http://{template_c.name}:{CHAPTARR_PORT}"
+        api_key = self.template_api_key(template_c)
+
+        owner_profile = profiles.get(owner_id) if owner_id else None
+        tokens = self.owner_tokens(template_c, owner_id, owner_profile, Path(abs_config))
+        roots = self.template_roots(template_c, owner_profile)
+
+        env = template_c.env
+        docker_cfg: dict[str, Any] = {
+            "network": network,
+            "image": template_c.image or DEFAULT_IMAGE,
+            "puid": int(env["PUID"]) if env.get("PUID", "").isdigit() else 1000,
+            "pgid": int(env["PGID"]) if env.get("PGID", "").isdigit() else 1000,
+            "tz": env.get("TZ") or "Etc/UTC",
+        }
+        if env.get("UMASK"):
+            docker_cfg["umask"] = env["UMASK"]
+        for k in ("PUID", "PGID", "TZ"):
+            if not env.get(k):
+                self.note(f"template has no {k}; using {docker_cfg[k.lower()]}")
+
+        paths, extra_volumes, downloads_dest = self.infer_paths(template_c, abs_c, tokens, roots)
+        if extra_volumes:
+            docker_cfg["extra_volumes"] = extra_volumes
+
+        raw: dict[str, Any] = {
+            "state_dir": "/var/lib/chaptarr-provision",
+            "stacks_dir": "/opt/chaptarr-stacks",
+            "hooks_dir": f"{self.config_dir}/hooks.d",
+            "server": {"listen": DEFAULT_LISTEN, "token_file": f"{self.config_dir}/token"},
+            "abs": {"url": abs_url, "api_key_file": f"{self.config_dir}/abs_api_key", "container": abs_c.name,
+                    "config_dir": abs_config},
+            "docker": docker_cfg,
+            "paths": paths,
+            "template": {"url": template_url, "api_key": self.secret(api_key)},
+        }
+
+        clients, indexer_secrets = self.read_providers(template_c, api_key, tokens)
+        if clients:
+            raw["download_clients"] = clients
+        if indexer_secrets:
+            raw["indexer_secrets"] = indexer_secrets
+
+        prowlarr = self.find_prowlarr(containers, network, template_c)
+        if prowlarr:
+            raw["prowlarr"] = prowlarr
+
+        if not settings.get("url"):
+            self.note("ABS plugin has no shared Chaptarr url set")
+        return {"config": raw, "settings": settings, "downloads_dest": downloads_dest}
+
+    # ---- ABS settings
+
+    def read_abs_settings(self, abs_config: Path) -> dict:
+        path = abs_config / "plugins" / ".state" / "chaptarr" / "settings.json"
+        if not path.exists():
+            legacy = abs_config / "plugins" / "chaptarr" / "settings.json"
+            path = legacy if legacy.exists() else path
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError:
+            raise DiscoveryError(f"Chaptarr plugin settings not found at {path}; install and configure the "
+                                 "Chaptarr plugin in ABS first") from None
+        except ValueError as exc:
+            raise DiscoveryError(f"{path} is not JSON: {exc}") from None
+        self.note(f"plugin settings: {path}")
+        raw_profiles = data.get("userProfiles") or ""
+        profiles = parse_profiles_input(json.dumps(raw_profiles)) if raw_profiles else {}
+        for prof in profiles.values():
+            self.secret(prof.get("apiKey"))
+        self.secret(data.get("apiKey"))
+        self.secret(data.get("password"))
+        self.secret(data.get("provisionerToken"))
+        self.profiles_text = json.dumps(profiles) if profiles else None
+        url = str(data.get("url") or "").strip()
+        self.note(f"{len(profiles)} existing user profile(s): {', '.join(sorted(profiles)) or 'none'}")
+        self.note(f"shared admin connection url: {url or 'not set'}")
+        self.note(f"provisionerUrl is {'set to ' + data['provisionerUrl'] if data.get('provisionerUrl') else 'not set'}")
+        return {"profiles": profiles, "url": url, "provisionerUrl": data.get("provisionerUrl") or "",
+                "path": str(path), "raw": data}
+
+    # ---- template
+
+    def choose_template(self, containers: list[Container], settings: dict) -> tuple[Container, str | None]:
+        profiles = settings["profiles"]
+        mapped: dict[str, Container] = {}
+        for uid, prof in profiles.items():
+            c = self.by_hostname(containers, prof.get("url", ""))
+            if c:
+                mapped[uid] = c
+                self.note(f"profile {uid}: {prof.get('url')} -> container {c.name}")
+            else:
+                self.warn(f"profile {uid}: {prof.get('url')} does not match a running container")
+
+        def owner_of(c: Container) -> str | None:
+            return next((uid for uid, mc in mapped.items() if mc.id == c.id), None)
+
+        if self.template_arg:
+            wanted = self.template_arg.lower()
+            for c in containers:
+                if c.name.lower() in (wanted, f"chaptarr-{wanted}") or wanted in c.dns_names():
+                    self.note(f"template (from --template): {c.name}")
+                    return c, owner_of(c)
+            raise DiscoveryError(f"--template {self.template_arg!r} does not match a running container")
+        if settings.get("url"):
+            c = self.by_hostname(containers, settings["url"])
+            if c:
+                self.note(f"template: {c.name} (the plugin's shared admin connection)")
+                return c, owner_of(c)
+            self.warn(f"shared url {settings['url']} does not match a running container")
+        if mapped:
+            uid, c = next(iter(mapped.items()))
+            self.note(f"template: {c.name} (first profile, {uid})")
+            return c, uid
+        raise DiscoveryError("cannot find a template Chaptarr: no shared url or profile maps to a running container; "
+                             "pass --template CONTAINER")
+
+    def template_api_key(self, c: Container) -> str:
+        key = c.env.get("Chaptarr__Auth__ApiKey")
+        if key:
+            self.note("template API key: from its Chaptarr__Auth__ApiKey env")
+            return key
+        cfg = c.host_path("/config")
+        key = read_xml_tag(Path(cfg) / "config.xml", "ApiKey") if cfg else None
+        if not key:
+            raise DiscoveryError(f"cannot read the API key of {c.name}: no Chaptarr__Auth__ApiKey env and no "
+                                 f"<ApiKey> in {cfg or '(no /config mount)'}/config.xml")
+        self.note(f"template API key: from {cfg}/config.xml")
+        return key
+
+    def owner_tokens(self, c: Container, owner_id: str | None, profile: dict | None, abs_config: Path) -> list[str]:
+        tokens: list[str] = []
+        username = None
+        if owner_id:
+            db = abs_config / "absdatabase.sqlite"
+            with contextlib.suppress(Exception):
+                rows = sqlite_rows(db, "SELECT id, username FROM users")
+                username = next((r["username"] for r in rows if r["id"] == owner_id), None)
+        if not username and profile:
+            for media in ("ebook", "audiobook"):
+                label = str((profile.get(media) or {}).get("label") or "")
+                m = re.match(r"^(.+?)\s+(e-?books?|audiobooks?)$", label, re.IGNORECASE)
+                if m:
+                    username = m.group(1)
+                    break
+        if username:
+            tokens += [username, username.lower()]
+            with contextlib.suppress(ValidationError):
+                tokens.append(slugify(username))
+        prefix = "chaptarr-"
+        if c.name.lower().startswith(prefix) and len(c.name) > len(prefix):
+            tokens.append(c.name[len(prefix):].lower())
+        tokens = sorted(set(tokens), key=len, reverse=True)
+        self.note(f"template owner: {username or 'unknown'} (path tokens: {', '.join(tokens) or 'none'})")
+        return tokens
+
+    def template_roots(self, c: Container, profile: dict | None) -> dict:
+        roots = {}
+        if profile:
+            for media in ("ebook", "audiobook"):
+                if (profile.get(media) or {}).get("path"):
+                    roots[media] = profile[media]["path"]
+        if len(roots) < 2:
+            db = self.template_db(c)
+            if db:
+                with contextlib.suppress(Exception):
+                    for r in sqlite_rows(db, 'SELECT "Path", "FolderType" FROM "RootFolders"'):
+                        media = {FOLDER_TYPE_EBOOK: "ebook", FOLDER_TYPE_AUDIOBOOK: "audiobook"}.get(r["FolderType"])
+                        if media and media not in roots:
+                            roots[media] = r["Path"]
+        for media in ("ebook", "audiobook"):
+            if media not in roots:
+                guess = "/books/ebooks" if media == "ebook" else "/books/audiobooks"
+                roots[media] = guess
+                self.warn(f"no {media} root folder found on the template; assumed {guess}")
+        self.note(f"template root folders: ebook {roots['ebook']}, audiobook {roots['audiobook']}")
+        return roots
+
+    def template_db(self, c: Container) -> Path | None:
+        cfg = c.host_path("/config")
+        if not cfg:
+            return None
+        for name in ("chaptarr.db", "readarr.db", "audioarr.db"):  # PathExtensions.GetDatabase order
+            p = Path(cfg) / name
+            if p.exists():
+                return p
+        return None
+
+    # ---- paths
+
+    def infer_paths(self, t: Container, abs_c: Container, tokens: list[str], roots: dict) -> tuple[dict, list, str]:
+        paths: dict[str, dict] = {}
+        used: set[str] = set()
+
+        def per_user(host: str, what: str) -> str:
+            tmpl = templatize(host, tokens)
+            if tmpl:
+                return tmpl
+            tmpl = sibling_template(host)
+            self.note(f"{what}: {host} is not per-user; new users get {tmpl}")
+            return tmpl
+
+        cfg_mount = t.mount_at("/config")
+        if not cfg_mount or cfg_mount[0].get("Type", "bind") != "bind":
+            raise DiscoveryError(f"template {t.name} has no bind mount at /config")
+        used.add(norm_path(cfg_mount[0]["Destination"]))
+        paths["config"] = {"host": per_user(t.host_path("/config"), "config"), "container": "/config"}
+
+        for media, key in (("ebook", "ebooks"), ("audiobook", "audiobooks")):
+            container_path = roots[media]
+            found = t.mount_at(container_path)
+            if not found:
+                raise DiscoveryError(f"template {t.name}: no mount contains its {media} root {container_path}")
+            used.add(norm_path(found[0]["Destination"]))
+            host = t.host_path(container_path)
+            entry = {"host": per_user(host, key),
+                     "container": templatize(container_path, tokens) or container_path}
+            entry["abs"] = self.abs_side(abs_c, entry["host"], key)
+            paths[key] = entry
+
+        downloads_dest = ""
+        extra: list[str] = []
+        dl = next((m for m in t.mounts if "download" in str(m.get("Destination", "")).lower()
+                   and m.get("Type", "bind") == "bind" and norm_path(str(m["Destination"])) not in used), None)
+        if dl:
+            dest, src = norm_path(dl["Destination"]), norm_path(dl["Source"])
+            used.add(dest)
+            downloads_dest = dest
+            per = templatize(src, tokens)
+            if per:
+                paths["downloads"] = {"host": per, "container": templatize(dest, tokens) or dest}
+            else:
+                extra.append(f"{src}:{dest}" + ("" if dl.get("RW", True) else ":ro"))
+                paths["downloads"] = {"host": f"{src}/chaptarr-{{slug}}", "container": f"{dest}/chaptarr-{{slug}}"}
+                self.note(f"downloads: {src} is shared; mounted as-is, per-user folders go in chaptarr-{{slug}}/")
+        else:
+            cfg_host = paths["config"]["host"]
+            parent = cfg_host.rsplit("/", 1)[0]
+            paths["downloads"] = {"host": f"{parent}/downloads", "container": "/downloads"}
+            self.warn(f"template has no downloads mount; assumed {parent}/downloads per user")
+
+        for m in t.mounts:
+            dest = norm_path(str(m.get("Destination", "")))
+            if dest in used or m.get("Type", "bind") != "bind":
+                if m.get("Type") not in (None, "bind") and dest not in used:
+                    self.note(f"skipped {m.get('Type')} mount at {dest}")
+                continue
+            src = norm_path(str(m.get("Source", "")))
+            if dest == "/var/run/docker.sock":
+                continue
+            src_t = templatize(src, tokens) or src
+            extra.append(f"{src_t}:{dest}" + ("" if m.get("RW", True) else ":ro"))
+            self.note(f"extra volume: {src_t}:{dest}")
+        return paths, extra, downloads_dest
+
+    def abs_side(self, abs_c: Container, host_template: str, key: str) -> str:
+        probe = host_template.replace("{slug}", "zz-probe-slug")
+        mapped = abs_c.container_path_for_host(probe)
+        if mapped:
+            return mapped.replace("zz-probe-slug", "{slug}")
+        parent = static_prefix(host_template)
+        if parent in self._abs_mount_warned:
+            self.note(f"{key}: also needs the ABS mount {parent}:{parent} (see warning)")
+            return host_template
+        self._abs_mount_warned.add(parent)
+        self.warn(f"{key}: new users' folders ({host_template}) are outside every ABS mount. Add a parent mount to "
+                  f"the ABS service and recreate it:\n      volumes:\n        - {parent}:{parent}\n"
+                  f"    The config assumes that mount (abs path {host_template}).")
+        return host_template
+
+    # ---- providers
+
+    def masked_fields(self, c: Container, api_key: str, kind: str) -> dict[str, set[str]] | None:
+        ip = c.ip()
+        if not ip:
+            return None
+        try:
+            items = chaptarr_client(self.http, f"http://{ip}:{CHAPTARR_PORT}", api_key).get(f"/api/v1/{kind}") or []
+        except ProvisionError:
+            return None
+        return {i.get("name", ""): {f["name"] for f in i.get("fields") or [] if f.get("value") == SECRET_PLACEHOLDER}
+                for i in items}
+
+    def read_providers(self, t: Container, api_key: str, tokens: list[str]) -> tuple[list, dict]:
+        if t.env.get("Chaptarr__Postgres__Host"):
+            return self.providers_from_api_only(t, api_key)
+        db = self.template_db(t)
+        if not db:
+            self.warn(f"template database not found under {t.host_path('/config')}; download clients and indexer "
+                      "secrets must be added by hand")
+            return [], {}
+        self.note(f"template database: {db} (read-only)")
+        clients_masked = self.masked_fields(t, api_key, "downloadclient")
+        indexers_masked = self.masked_fields(t, api_key, "indexer")
+        if clients_masked is None:
+            self.note("template API not reachable from here; secret fields picked by name")
+        rows = sqlite_rows(db, 'SELECT "Id", "Name", "Implementation", "Settings" FROM "DownloadClients"')
+        rpms = sqlite_rows(db, 'SELECT "DownloadClientId", "Host", "RemotePath", "LocalPath" FROM "RemotePathMappings"')
+        clients = []
+        for r in rows:
+            settings = json.loads(r["Settings"] or "{}")
+            secret_names = self._secret_names(settings, (clients_masked or {}).get(r["Name"]))
+            entry: dict[str, Any] = {"name": r["Name"], "implementation": r["Implementation"], "from_template": True}
+            fields = {k: self.secret(settings[k]) for k in sorted(secret_names) if settings.get(k)}
+            if fields:
+                entry["fields"] = fields
+            maps = [{"remote_path": m["RemotePath"],
+                     "local_path": templatize(m["LocalPath"], tokens) or m["LocalPath"],
+                     **({"host": m["Host"]} if m.get("Host") else {})}
+                    for m in rpms if m["DownloadClientId"] == r["Id"]]
+            if maps:
+                entry["remote_path_mappings"] = maps
+            clients.append(entry)
+            self.note(f"download client {r['Name']} ({r['Implementation']}): secrets {', '.join(sorted(fields)) or 'none'}, "
+                      f"{len(maps)} remote path mapping(s)")
+        indexer_secrets = {}
+        for r in sqlite_rows(db, 'SELECT "Name", "Implementation", "Settings" FROM "Indexers"'):
+            settings = json.loads(r["Settings"] or "{}")
+            names = self._secret_names(settings, (indexers_masked or {}).get(r["Name"]))
+            vals = {k: self.secret(settings[k]) for k in sorted(names) if settings.get(k)}
+            if vals:
+                indexer_secrets[r["Name"]] = vals
+            self.note(f"indexer {r['Name']}: secrets {', '.join(sorted(vals)) or 'none'}")
+        return clients, indexer_secrets
+
+    @staticmethod
+    def _secret_names(settings: dict, masked: set[str] | None) -> set[str]:
+        names = set(masked) if masked is not None else {k for k in settings if SECRET_FIELD_RE.search(k)}
+        return {n for n in names if "category" not in n.lower() and "." not in n}
+
+    def providers_from_api_only(self, t: Container, api_key: str) -> tuple[list, dict]:
+        self.warn(f"template {t.name} uses PostgreSQL: its database was not read. Fill in every CHANGE-ME value "
+                  "in the config by hand.")
+        clients, idx = [], {}
+        for name, fields in (self.masked_fields(t, api_key, "downloadclient") or {}).items():
+            entry: dict[str, Any] = {"name": name, "from_template": True}
+            if fields:
+                entry["fields"] = {f: "CHANGE-ME" for f in sorted(fields) if "category" not in f.lower()}
+                self.warn(f"download client {name}: missing secret(s) {', '.join(sorted(entry['fields']))}")
+            clients.append(entry)
+        for name, fields in (self.masked_fields(t, api_key, "indexer") or {}).items():
+            if fields:
+                idx[name] = {f: "CHANGE-ME" for f in sorted(fields)}
+                self.warn(f"indexer {name}: missing secret(s) {', '.join(sorted(fields))}")
+        return clients, idx
+
+    # ---- prowlarr
+
+    def find_prowlarr(self, containers: list[Container], network: str, t: Container) -> dict | None:
+        found = [c for c in containers if "prowlarr" in c.image.lower()]
+        if not found:
+            self.note("Prowlarr: not found; indexers will be copied from the template")
+            return None
+        p = next((c for c in found if network in c.networks), None)
+        if not p:
+            self.note(f"Prowlarr: {found[0].name} is not on {network}; indexers will be copied from the template")
+            return None
+        cfg = p.host_path("/config")
+        key = read_xml_tag(Path(cfg) / "config.xml", "ApiKey") if cfg else None
+        port = read_xml_tag(Path(cfg) / "config.xml", "Port") if cfg else None
+        port = port if port and port.isdigit() else "9696"
+        if not key:
+            self.note(f"Prowlarr: {p.name} found but its API key is unreadable; indexers will be copied")
+            return None
+        apps = None
+        ip = p.ip(network)
+        if ip:
+            with contextlib.suppress(ProvisionError):
+                apps = chaptarr_client(self.http, f"http://{ip}:{port}", key).get("/api/v1/applications")
+        if apps is None:
+            db = Path(cfg) / "prowlarr.db"
+            with contextlib.suppress(Exception):
+                apps = [{"implementation": r["Implementation"], "name": r["Name"],
+                         "fields": [{"name": k, "value": v} for k, v in json.loads(r["Settings"] or "{}").items()]}
+                        for r in sqlite_rows(db, 'SELECT "Name", "Implementation", "Settings" FROM "Applications"')]
+        names = t.dns_names() | {n.get("IPAddress", "") for n in t.networks.values()}
+        app = next((a for a in apps or [] if (urllib.parse.urlparse(str(fields_to_dict(a).get("baseUrl", ""))).hostname
+                                             or "").lower() in names), None)
+        if not app:
+            self.note(f"Prowlarr: {p.name} has no application pointing at {t.name}; indexers will be copied")
+            return None
+        self.note(f"Prowlarr: {p.name} syncs {t.name} as {app.get('implementation')}; new instances are added there")
+        url = f"http://{p.name}:{port}"
+        return {"url": url, "api_key": self.secret(key), "implementation": app.get("implementation") or "Readarr",
+                "prowlarr_url": str(fields_to_dict(app).get("prowlarrUrl") or url)}
+
+
+def discover_main(args: argparse.Namespace, docker: DockerRunner, http: HttpClient | None, masker: Masker) -> int:
+    d = Discovery(docker, http, abs_container=args.abs_container, template=args.template,
+                  config_dir=str(Path(args.write).parent) if args.write else DEFAULT_CONFIG_DIR)
+    out = d.run()
+    masker.add(*d.secret_values)
+    raw = out["config"]
+    raw["state_dir"] = args.state_dir
+    header = ("# Generated by `chaptarr-provision discover` on " + utcnow() + ".\n"
+              "# Review the summary it printed; every assumption is listed there.\n\n")
+    if args.write:
+        target = Path(args.write)
+        atomic_write(target, header + toml_dumps(raw), mode=0o600)
+        d.note(f"wrote {target} (mode 0600)")
+    else:
+        print(header + toml_dumps(redact(raw, d.secret_values)), end="")
+    if args.import_profiles:
+        if d.profiles_text:
+            store = StateStore(Path(raw["state_dir"]))
+            res = import_profiles_into(store, d.profiles_text)
+            d.note(f"imported {res['imported']} profile(s) into {store.profiles_path} "
+                   f"(added {len(res['added'])}, updated {len(res['updated'])})")
+        else:
+            d.note("no profiles to import")
+    lines = ["", "Discovery summary:"] + [f"  - {n}" for n in d.notes]
+    if d.warnings:
+        lines += ["", "WARNINGS:"] + [f"  ! {w}" for w in d.warnings]
+    lines += ["", "Not discoverable: the ABS admin API key (pass it to install-service --abs-api-key-file)."]
+    print(masker.mask("\n".join(lines)), file=sys.stderr if not args.write else sys.stdout)
+    return 0
+
+
+def import_profiles_into(store: StateStore, text: str) -> dict:
+    incoming = parse_profiles_input(text)
+    with store.lock("_profiles"):
+        merged = store.load_profiles()
+        added = [k for k in incoming if k not in merged]
+        updated = [k for k in incoming if k in merged and merged[k] != incoming[k]]
+        merged.update(incoming)
+        store.save_profiles(merged)
+    return {"imported": len(incoming), "added": sorted(added), "updated": sorted(updated), "total": len(merged)}
+
+
+# --------------------------------------------------------------------------- install-service
+
+
+def service_mounts(cfg: Config, config_path: Path) -> list[str]:
+    """Paths the provisioner container needs, mounted at identical paths (compose resolves on the host)."""
+    roots = ["/var/run/docker.sock", str(config_path.parent), str(cfg.state_dir), str(cfg.stacks_dir)]
+    for f in (cfg.raw.get("server") or {}).get("token_file"), (cfg.raw.get("abs") or {}).get("api_key_file"):
+        if f:
+            roots.append(str(Path(f).parent))
+    if cfg.hooks_dir:
+        roots.append(str(cfg.hooks_dir))
+    for key in FOLDER_KEYS:
+        host = (cfg.paths.get(key) or {}).get("host")
+        if host:
+            roots.append(static_prefix(host))
+    for vol in cfg.extra_volumes:
+        src = str(vol).split(":", 1)[0]
+        roots.append(static_prefix(src) if "{" in src else src)
+    out: list[str] = []
+    for r in sorted({norm_path(r) for r in roots if r and r != "/"}, key=len):
+        if not any(r == o or r.startswith(o.rstrip("/") + "/") for o in out):
+            out.append(r)
+    return out
+
+
+def render_service_compose(cfg: Config, config_path: Path, image: str) -> str:
+    vols = "\n".join(f"      - {json.dumps(f'{m}:{m}')}" for m in service_mounts(cfg, config_path))
+    return f"""# Generated by `chaptarr-provision install-service`. Re-run it to update.
+# Internal service: no published ports. Only the ABS container should reach it.
+name: {PROVISIONER_NAME}
+
+services:
+  provisioner:
+    image: {json.dumps(image)}
+    container_name: {PROVISIONER_NAME}
+    hostname: {PROVISIONER_NAME}
+    restart: unless-stopped
+    command: ["serve", "--listen", "0.0.0.0:{PROVISIONER_PORT}"]
+    environment:
+      CHAPTARR_PROVISION_CONFIG: {json.dumps(str(config_path))}
+    volumes:
+{vols}
+    networks:
+      - shared
+
+networks:
+  shared:
+    name: {json.dumps(cfg.network)}
+    external: true
+"""
+
+
+def plan_settings_patch(plugin: dict | None, desired: dict) -> tuple[bool, str]:
+    """Decide whether PATCHing only ``desired`` is safe for this ABS plugin.
+
+    ABS (PluginSdkManager.updateSettings -> validateSettings(manifest, values, previous, patch=true))
+    starts from the previous settings, applies only the keys sent, keeps a secret when the patch
+    sends '' for it, and rejects unknown keys. So a partial PATCH keeps userProfiles and apiKey,
+    provided the schema knows both keys. Anything else is refused here.
+    """
+    if not plugin:
+        return False, "the Chaptarr plugin is not installed in ABS"
+    keys = {f.get("key") for f in plugin.get("settingsSchema") or []}
+    missing = [k for k in desired if k not in keys]
+    if missing:
+        return False, f"this plugin version has no setting(s) {', '.join(missing)}; update the plugin first"
+    if not isinstance(plugin.get("secretsSet"), dict):
+        return False, "ABS did not report which secrets are set, so a partial update cannot be verified"
+    return True, "ok"
+
+
+def install_service_main(args: argparse.Namespace, docker: DockerRunner, http: HttpClient | None,
+                         masker: Masker, sleep: Callable[[float], None] = time.sleep) -> int:
+    config_path = Path(args.config)
+    raw = tomllib.loads(config_path.read_text())
+    server = raw.get("server") or {}
+    abs_ = raw.get("abs") or {}
+    report: list[str] = []
+
+    token_file = Path(server.get("token_file") or f"{config_path.parent}/token")
+    if server.get("token"):
+        token = str(server["token"])
+        report.append("serve token: inline in config")
+    elif token_file.exists() and token_file.read_text().strip():
+        token = token_file.read_text().strip()
+        report.append(f"serve token: kept {token_file}")
+    else:
+        token = secrets.token_urlsafe(32)
+        atomic_write(token_file, token + "\n", mode=0o600)
+        report.append(f"serve token: generated {token_file} (mode 0600)")
+    masker.add(token)
+
+    abs_key = Path(args.abs_api_key_file).read_text().strip()
+    if not abs_key:
+        raise ValidationError(f"{args.abs_api_key_file} is empty")
+    masker.add(abs_key)
+    key_target = Path(abs_.get("api_key_file") or f"{config_path.parent}/abs_api_key")
+    if not abs_.get("api_key"):
+        current = key_target.read_text().strip() if key_target.exists() else None
+        if current != abs_key:
+            atomic_write(key_target, abs_key + "\n", mode=0o600)
+            report.append(f"ABS API key: stored in {key_target} (mode 0600)")
+
+    cfg = load_config(config_path)
+    cfg.validate(need_server=True)
+    stack = cfg.stacks_dir / PROVISIONER_NAME
+    compose = stack / "compose.yaml"
+    text = render_service_compose(cfg, config_path, args.image)
+    changed = not compose.exists() or compose.read_text() != text
+    atomic_write(compose, text, mode=0o644)
+    report.append(f"compose: {compose} {'written' if changed else 'unchanged'}")
+    docker.run(["compose", "-f", str(compose), "-p", PROVISIONER_NAME, "up", "-d", "--remove-orphans"],
+               cwd=str(stack))
+
+    client = http or HttpClient(10)
+    health = None
+    deadline = time.monotonic() + float(args.timeout)
+    while True:
+        ip = None
+        with contextlib.suppress(Exception):
+            info = json.loads(docker.run(["inspect", PROVISIONER_NAME]).stdout)[0]
+            ip = Container(info).ip(cfg.network)
+        if ip:
+            with contextlib.suppress(ProvisionError):
+                health = ApiClient(client, f"http://{ip}:{PROVISIONER_PORT}",
+                                   {"Authorization": f"Bearer {token}"}).get("/v1/health")
+        if health or time.monotonic() > deadline:
+            break
+        sleep(1)
+    if not health:
+        raise ProvisionError(f"{PROVISIONER_NAME} did not answer /v1/health within {args.timeout}s; "
+                             f"see `docker logs {PROVISIONER_NAME}`")
+    report.append(f"service healthy (version {health.get('version')})")
+
+    desired = {"provisionerUrl": f"http://{PROVISIONER_NAME}:{PROVISIONER_PORT}", "provisionerToken": token}
+    abs_api = abs_client(client, cfg.abs_url, abs_key)
+    try:
+        plugins = (abs_api.get("/api/plugins") or {}).get("plugins", [])
+    except HttpError:
+        raise
+    except ProvisionError:
+        # On the host, container names do not resolve: go to the ABS container's IP instead.
+        name = abs_.get("container")
+        info = json.loads(docker.run(["inspect", name]).stdout)[0] if name else None
+        ip = Container(info).ip(cfg.network) if info else None
+        if not ip:
+            raise
+        port = urllib.parse.urlparse(cfg.abs_url).port or 80
+        abs_api = abs_client(client, f"http://{ip}:{port}", abs_key)
+        plugins = (abs_api.get("/api/plugins") or {}).get("plugins", [])
+    plugin = next((p for p in plugins if p.get("id") == cfg.abs_plugin_id), None)
+    ok, why = plan_settings_patch(plugin, desired)
+    if ok:
+        # Always re-send: idempotent, and it repairs a token that drifted.
+        before = {k for k, v in plugin["secretsSet"].items() if v}
+        res = abs_api.patch(f"/api/plugins/{cfg.abs_plugin_id}/settings", desired) or {}
+        updated = res.get("plugin") if isinstance(res, dict) else None
+        if not isinstance(updated, dict):
+            updated = next((p for p in (abs_api.get("/api/plugins") or {}).get("plugins", [])
+                            if p.get("id") == cfg.abs_plugin_id), {})
+        after = {k for k, v in (updated.get("secretsSet") or {}).items() if v}
+        lost = sorted(before - after)
+        if lost:
+            raise ProvisionError(f"ABS dropped secret setting(s) {', '.join(lost)} after the update; re-enter "
+                                 "them in Settings > Plugins > Chaptarr (userProfiles can be restored from "
+                                 f"{cfg.state_dir}/profiles.json)")
+        report.append(f"ABS plugin: provisionerUrl = {desired['provisionerUrl']}, provisionerToken set "
+                      f"(kept: {', '.join(sorted(before - set(desired))) or 'nothing else was set'})")
+    else:
+        report.append(f"ABS plugin NOT updated: {why}. Set these in Settings > Plugins > Chaptarr:")
+        report.append(f"    Provisioner address: {desired['provisionerUrl']}")
+        report.append(f"    Provisioner token:   the contents of {token_file}")
+    print(masker.mask("\n".join(report)))
+    return 0 if ok else 1
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -1783,6 +2693,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-profiles", help="seed profiles.json from the plugin's userProfiles JSON")
     p.add_argument("file", help="path, or - for stdin")
 
+    p = sub.add_parser("discover", help="inspect the Docker host and generate config.toml")
+    p.add_argument("--abs-container", help="ABS container name (default: auto-detect)")
+    p.add_argument("--template", help="template Chaptarr: slug or container name (default: auto)")
+    p.add_argument("--write", metavar="PATH", help="write the config here (mode 0600); default: print it redacted")
+    p.add_argument("--import-profiles", action="store_true", help="also seed profiles.json from the ABS plugin")
+    p.add_argument("--state-dir", default="/var/lib/chaptarr-provision", help="state_dir to write into the config")
+
+    p = sub.add_parser("install-service", help="run `serve` as a container on the ABS network and point ABS at it")
+    p.add_argument("--abs-api-key-file", required=True, help="file holding an ABS admin API key")
+    p.add_argument("--image", default=DEFAULT_PROVISIONER_IMAGE)
+    p.add_argument("--timeout", type=float, default=90, help="seconds to wait for /v1/health")
+
     p = sub.add_parser("serve", help="run the HTTP API for the ABS plugin")
     p.add_argument("--listen", help=f"host:port (default from config, else {DEFAULT_LISTEN})")
     return ap
@@ -1799,6 +2721,10 @@ def main(argv: list[str] | None = None, *, http: HttpClient | None = None,
     LOG.setLevel(logging.DEBUG if args.verbose else logging.INFO)
     LOG.propagate = False
     try:
+        if args.cmd == "discover":
+            return discover_main(args, docker or DockerRunner(["docker"]), http, masker)
+        if args.cmd == "install-service":
+            return install_service_main(args, docker or DockerRunner(["docker"]), http, masker)
         cfg = load_config(args.config)
         cfg.validate(need_server=args.cmd == "serve")
         prov = Provisioner(cfg, http=http, docker=docker, masker=masker)
