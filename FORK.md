@@ -15,7 +15,7 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 ## Roadmap
 
 1. Baseline and CI on the self-hosted ci-linux runners
-2. Bug-fix batch: upstream fix PRs, ABS-1 search crash, upstream bug issues, and replacing ImageSharp 3.x (unpatched advisories suppressed in `src/Directory.Build.props`)
+2. Bug-fix batch: upstream fix PRs, ABS-1 search crash, upstream bug issues
 3. Native Shelfmark indexer and download client (ebooks and audiobooks, per-user destinations, mapped-user auth, series-pack grouping)
 4. One-step user provisioning (one Chaptarr instance per user), then the prod v1 release
 

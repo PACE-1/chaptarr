@@ -17,7 +17,6 @@ using NzbDrone.Core.MediaFiles.TagExtraction;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Qualities;
 using NzbDrone.Core.RootFolders;
-using PdfSharpCore.Pdf.IO;
 using VersOne.Epub;
 using VersOne.Epub.Schema;
 
@@ -683,51 +682,55 @@ namespace NzbDrone.Core.MediaFiles
 
             try
             {
-                using var book = PdfReader.Open(file, PdfDocumentOpenMode.InformationOnly);
-                if (book.Info != null)
+                // Only the document information dictionary is read; page content and images are never decoded.
+                using var book = UglyToad.PdfPig.PdfDocument.Open(file);
+                var info = book.Information;
+                if (info != null)
                 {
                     // Basic fields
-                    if (!string.IsNullOrWhiteSpace(book.Info.Title))
+                    if (!string.IsNullOrWhiteSpace(info.Title))
                     {
-                        tags["title"] = book.Info.Title;
+                        tags["title"] = info.Title;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(book.Info.Author))
+                    if (!string.IsNullOrWhiteSpace(info.Author))
                     {
-                        tags["author"] = book.Info.Author;
-                        tags["authors"] = book.Info.Author;
+                        tags["author"] = info.Author;
+                        tags["authors"] = info.Author;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(book.Info.Subject))
+                    if (!string.IsNullOrWhiteSpace(info.Subject))
                     {
-                        tags["subject"] = book.Info.Subject;
-                        tags["description"] = book.Info.Subject;
+                        tags["subject"] = info.Subject;
+                        tags["description"] = info.Subject;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(book.Info.Keywords))
+                    if (!string.IsNullOrWhiteSpace(info.Keywords))
                     {
-                        tags["keywords"] = book.Info.Keywords;
-                        tags["tags"] = book.Info.Keywords;
+                        tags["keywords"] = info.Keywords;
+                        tags["tags"] = info.Keywords;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(book.Info.Creator))
+                    if (!string.IsNullOrWhiteSpace(info.Creator))
                     {
-                        tags["creator"] = book.Info.Creator;
+                        tags["creator"] = info.Creator;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(book.Info.Producer))
+                    if (!string.IsNullOrWhiteSpace(info.Producer))
                     {
-                        tags["producer"] = book.Info.Producer;
+                        tags["producer"] = info.Producer;
                     }
 
-                    if (book.Info.CreationDate != DateTime.MinValue)
+                    var created = info.GetCreatedDateTimeOffset();
+                    if (created.HasValue)
                     {
-                        tags["creation_date"] = book.Info.CreationDate.ToString("yyyy-MM-dd");
+                        tags["creation_date"] = created.Value.DateTime.ToString("yyyy-MM-dd");
                     }
 
-                    if (book.Info.ModificationDate != DateTime.MinValue)
+                    var modified = info.GetModifiedDateTimeOffset();
+                    if (modified.HasValue)
                     {
-                        tags["modification_date"] = book.Info.ModificationDate.ToString("yyyy-MM-dd");
+                        tags["modification_date"] = modified.Value.DateTime.ToString("yyyy-MM-dd");
                     }
 
                     // Log all extracted fields
