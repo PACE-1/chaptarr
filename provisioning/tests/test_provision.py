@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
 import stat
 import sys
 import tempfile
@@ -612,7 +611,9 @@ def _to_toml(raw: dict) -> str:
         return json.dumps(v)
 
     def table(prefix, d):
-        scalars = {k: v for k, v in d.items() if not isinstance(v, dict) and not (isinstance(v, list) and v and isinstance(v[0], dict))}
+        def nested(v):
+            return isinstance(v, dict) or (isinstance(v, list) and v and isinstance(v[0], dict))
+        scalars = {k: v for k, v in d.items() if not nested(v)}
         if prefix:
             lines.append(f"[{prefix}]")
         for k, v in scalars.items():
