@@ -157,14 +157,8 @@ jobs:
   build:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Pull requests run the full test suite on Linux and macOS, which finish in
-        # about the same time. Windows is the long pole (roughly twice as slow), so it
-        # runs on every push to develop/main and in release validation instead.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    # Chaptarr only ships as a Linux container image, so Linux is the only OS it is built and tested on.
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -197,23 +191,6 @@ jobs:
     - name: Test
       run: dotnet test src/Chaptarr.Core.Test/Chaptarr.Core.Test.csproj --configuration Release --no-restore --verbosity normal
     
-    # The publish output is framework-dependent and nothing downstream consumes it
-    # (images build from source, native zips are suppressed), so PRs skip it.
-    - name: Publish
-      if: github.event_name != 'pull_request'
-      run: |
-        dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o ./publish/Chaptarr
-        dotnet publish src/NzbDrone.Update/Chaptarr.Update.csproj -c Release -f net10.0 -o ./publish/Chaptarr/Chaptarr.Update
-    
-    - name: Upload artifacts
-      if: github.event_name != 'pull_request'
-      uses: actions/upload-artifact@v4
-      with:
-        name: chaptarr-${{ runner.os == 'Windows' && 'win' || runner.os == 'macOS' && 'osx' || 'linux' }}
-        path: ./publish/
-        retention-days: 7
-        if-no-files-found: error
-
   frontend:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'

@@ -24,7 +24,7 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 
 Everything runs on GitHub Actions in `PACE-1/chaptarr`. Forgejo isn't used until the codebase moves there.
 
-- `build.yml` runs on every PR and push to `develop`/`main`. It covers the backend build and tests on Linux, Windows and macOS, the frontend typecheck and build, and the Postgres migration smoke test.
+- `build.yml` runs on every PR and push to `develop`/`main`. It covers the backend build and tests, the frontend typecheck and build, and the Postgres migration smoke test, all on Linux only, since Chaptarr ships only as a container image.
 - `docker-publish.yml` publishes `ghcr.io/pace-1/chaptarr:develop` (plus `:sha-<short>`) after every green push build on `develop`. A manual run on any other branch publishes `:branch-<name>` for testing.
 - `release.yml` (manual) tags the version in `package.json`, creates the GitHub release, and publishes `:<version>`, plus `:latest` from `main`.
 - The in-app update check reads releases from `PACE-1/chaptarr`, never from upstream.
