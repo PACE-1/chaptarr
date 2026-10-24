@@ -21,7 +21,8 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 
 ## CI and releases
 
-- GitHub (`PACE-1/chaptarr`) is the source of truth. Forgejo pull-mirrors it and runs `.forgejo/workflows/ci.yml` on the `ci-linux` runners.
+- GitHub (`PACE-1/chaptarr`) is the source of truth: branches, PRs and merges happen there. GitHub Actions are not used.
+- Forgejo (`isaac/chaptarr`) runs all CI on the `ci-linux` runners. `sync-from-github.yml` copies every GitHub branch and tag into it every 10 minutes (Forgejo-only branches are left alone), and `ci.yml` runs on every synced branch.
 - A `v*` tag (or a manual run) publishes `git.banditserver.com/<owner>/chaptarr` for linux/amd64 after every check passes.
 - The in-app update check reads releases from `PACE-1/chaptarr`, never from upstream.
 - Every change is verified on **librarytest** before it is promoted to prod.

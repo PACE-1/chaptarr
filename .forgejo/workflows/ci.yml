@@ -1,20 +1,21 @@
 name: CI
 
 on:
+  # Every branch synced from GitHub gets CI, not just main and develop.
   push:
-    branches: [ main, develop ]
+    branches: [ '**' ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
 
 # Forgejo reads .forgejo/workflows instead of .github/workflows, so this file is
-# the whole CI for the fork's Forgejo mirror. The GitHub workflows stay untouched.
+# the whole CI for the fork's Forgejo copy (synced from GitHub by sync-from-github.yml). The GitHub workflows stay untouched.
 # Everything runs on the self-hosted ci-linux runners.
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   guards:
