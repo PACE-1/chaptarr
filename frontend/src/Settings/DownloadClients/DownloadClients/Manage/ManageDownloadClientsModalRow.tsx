@@ -7,7 +7,7 @@ import TableRow from 'Components/Table/TableRow';
 import TagListConnector from 'Components/TagListConnector';
 import { kinds } from 'Helpers/Props';
 import { SelectStateInputProps } from 'typings/props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import styles from './ManageDownloadClientsModalRow.css';
 
@@ -69,7 +69,7 @@ function ManageDownloadClientsModalRow(
       <TableRowCell className={styles.protocol}>
         {protocol ? (
           <Label kind={kinds.INFO} outline={true}>
-            {titleCase(protocol)}
+            {getProtocolName(protocol)}
           </Label>
         ) : null}
       </TableRowCell>

@@ -1,6 +1,6 @@
 import PropTypes from 'prop-types';
 import React from 'react';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 
 function TagDetailsDelayProfile(props) {
@@ -8,14 +8,16 @@ function TagDetailsDelayProfile(props) {
     preferredProtocol,
     enableUsenet,
     enableTorrent,
+    enableDirectDownload,
     usenetDelay,
-    torrentDelay
+    torrentDelay,
+    directDownloadDelay
   } = props;
 
   return (
     <div>
       <div>
-        {translate('TagDetailsProtocol', { protocol: titleCase(preferredProtocol) })}
+        {translate('TagDetailsProtocol', { protocol: getProtocolName(preferredProtocol) })}
       </div>
 
       <div>
@@ -33,6 +35,15 @@ function TagDetailsDelayProfile(props) {
             translate('TagDetailsTorrentsDisabled')
         }
       </div>
+
+      <div>
+        {
+          // Missing/null on older profiles means enabled
+          enableDirectDownload === false ?
+            translate('TagDetailsDirectDownloadDisabled') :
+            translate('TagDetailsDirectDownloadDelay', { delay: directDownloadDelay ?? 0 })
+        }
+      </div>
     </div>
   );
 }
@@ -41,8 +52,10 @@ TagDetailsDelayProfile.propTypes = {
   preferredProtocol: PropTypes.string.isRequired,
   enableUsenet: PropTypes.bool.isRequired,
   enableTorrent: PropTypes.bool.isRequired,
+  enableDirectDownload: PropTypes.bool,
   usenetDelay: PropTypes.number.isRequired,
-  torrentDelay: PropTypes.number.isRequired
+  torrentDelay: PropTypes.number.isRequired,
+  directDownloadDelay: PropTypes.number
 };
 
 export default TagDetailsDelayProfile;

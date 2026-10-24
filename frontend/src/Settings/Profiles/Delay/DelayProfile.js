@@ -6,7 +6,7 @@ import Link from 'Components/Link/Link';
 import ConfirmModal from 'Components/Modal/ConfirmModal';
 import TagList from 'Components/TagList';
 import { icons, kinds } from 'Helpers/Props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import EditDelayProfileModalConnector from './EditDelayProfileModalConnector';
 import styles from './DelayProfile.css';
@@ -76,21 +76,36 @@ class DelayProfile extends Component {
       id,
       enableUsenet,
       enableTorrent,
+      enableDirectDownload,
       preferredProtocol,
       usenetDelay,
       torrentDelay,
+      directDownloadDelay,
       tags,
       tagList,
       isDragging,
       connectDragSource
     } = this.props;
 
-    let preferred = titleCase(preferredProtocol);
+    // Older profiles may not have enableDirectDownload set; treat that as enabled.
+    const isDirectDownloadEnabled = enableDirectDownload !== false;
 
-    if (!enableUsenet) {
-      preferred = 'Only Torrent';
-    } else if (!enableTorrent) {
-      preferred = 'Only Usenet';
+    const enabledProtocols = [
+      enableUsenet && 'usenet',
+      enableTorrent && 'torrent',
+      isDirectDownloadEnabled && 'directDownload'
+    ].filter(Boolean);
+
+    let preferred = getProtocolName(
+      enabledProtocols.includes(preferredProtocol) || !enabledProtocols.length ?
+        preferredProtocol :
+        enabledProtocols[0]
+    );
+
+    if (enabledProtocols.length === 1) {
+      preferred = translate('DelayProfileOnlyProtocol', {
+        protocol: getProtocolName(enabledProtocols[0])
+      });
     }
 
     return (
@@ -103,6 +118,7 @@ class DelayProfile extends Component {
         <div className={styles.column}>{preferred}</div>
         <div className={styles.column}>{getDelay(enableUsenet, usenetDelay)}</div>
         <div className={styles.column}>{getDelay(enableTorrent, torrentDelay)}</div>
+        <div className={styles.column}>{getDelay(isDirectDownloadEnabled, directDownloadDelay)}</div>
 
         <TagList
           tags={tags}
@@ -155,9 +171,11 @@ DelayProfile.propTypes = {
   id: PropTypes.number.isRequired,
   enableUsenet: PropTypes.bool.isRequired,
   enableTorrent: PropTypes.bool.isRequired,
+  enableDirectDownload: PropTypes.bool,
   preferredProtocol: PropTypes.string.isRequired,
   usenetDelay: PropTypes.number.isRequired,
   torrentDelay: PropTypes.number.isRequired,
+  directDownloadDelay: PropTypes.number,
   tags: PropTypes.arrayOf(PropTypes.number).isRequired,
   tagList: PropTypes.arrayOf(PropTypes.object).isRequired,
   isDragging: PropTypes.bool.isRequired,

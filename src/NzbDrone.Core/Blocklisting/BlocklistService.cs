@@ -69,6 +69,14 @@ namespace NzbDrone.Core.Blocklisting
                     .Any(b => SameTorrent(b, torrentInfo));
             }
 
+            if (release.DownloadProtocol == DownloadProtocol.DirectDownload)
+            {
+                // A direct download has no hash or publish date, so the same title from the same indexer is the same file.
+                return _blocklistRepository.BlocklistedByTitle(authorId, release.Title)
+                    .Where(b => b.Protocol == DownloadProtocol.DirectDownload)
+                    .Any(b => HasSameIndexer(b, release.Indexer));
+            }
+
             return _blocklistRepository.BlocklistedByTitle(authorId, release.Title)
                 .Where(b => b.Protocol == DownloadProtocol.Usenet)
                 .Any(b => SameNzb(b, release));

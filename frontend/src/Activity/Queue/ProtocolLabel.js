@@ -4,7 +4,13 @@ import Label from 'Components/Label';
 import styles from './ProtocolLabel.css';
 
 function ProtocolLabel({ protocol }) {
-  const protocolName = protocol === 'usenet' ? 'nzb' : protocol;
+  let protocolName = protocol;
+
+  if (protocol === 'usenet') {
+    protocolName = 'nzb';
+  } else if (protocol === 'directDownload') {
+    protocolName = 'direct';
+  }
 
   return (
     <Label className={styles[protocol]}>

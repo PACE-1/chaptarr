@@ -11,6 +11,7 @@ This is a maintained fork of [Chaptarr](https://github.com/Chaptarr/chaptarr) fo
 
 - **Bug fixes** (upstream PRs or issues): taken in after review. Each one needs a regression test.
 - **Enhancements and new features**: only after the owner signs off on each one.
+- **Database migrations**: fork migrations are numbered from 1001 up, so they can never take a number upstream later uses. FluentMigrator applies any unapplied version, so a cherry-picked upstream migration with a lower number still runs.
 
 ## Roadmap
 

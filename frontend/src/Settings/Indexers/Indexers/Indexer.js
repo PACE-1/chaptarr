@@ -6,7 +6,7 @@ import IconButton from 'Components/Link/IconButton';
 import ConfirmModal from 'Components/Modal/ConfirmModal';
 import TagList from 'Components/TagList';
 import { icons, kinds } from 'Helpers/Props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import EditIndexerModalConnector from './EditIndexerModalConnector';
 import styles from './Indexer.css';
@@ -126,7 +126,7 @@ class Indexer extends Component {
                 kind={kinds.INFO}
                 outline={true}
               >
-                {titleCase(protocol)}
+                {getProtocolName(protocol)}
               </Label>
           }
 

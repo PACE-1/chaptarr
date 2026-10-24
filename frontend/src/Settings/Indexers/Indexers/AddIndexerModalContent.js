@@ -9,7 +9,7 @@ import ModalContent from 'Components/Modal/ModalContent';
 import ModalFooter from 'Components/Modal/ModalFooter';
 import ModalHeader from 'Components/Modal/ModalHeader';
 import { kinds } from 'Helpers/Props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import AddIndexerItem from './AddIndexerItem';
 import styles from './AddIndexerModalContent.css';
@@ -26,11 +26,12 @@ class AddIndexerModalContent extends Component {
       schemaError,
       usenetIndexers,
       torrentIndexers,
+      directDownloadIndexers,
       onIndexerSelect,
       onModalClose
     } = this.props;
 
-    const implementationNameCounts = [...usenetIndexers, ...torrentIndexers].reduce((counts, indexer) => {
+    const implementationNameCounts = [...usenetIndexers, ...torrentIndexers, ...directDownloadIndexers].reduce((counts, indexer) => {
       const key = (indexer.implementationName || '').toLowerCase();
       counts[key] = (counts[key] || 0) + 1;
       return counts;
@@ -39,7 +40,7 @@ class AddIndexerModalContent extends Component {
     const getDisplayName = (indexer) => {
       const key = (indexer.implementationName || '').toLowerCase();
       if (implementationNameCounts[key] > 1) {
-        return `${indexer.implementationName} (${titleCase(indexer.protocol)})`;
+        return `${indexer.implementationName} (${getProtocolName(indexer.protocol)})`;
       }
 
       return indexer.implementationName;
@@ -112,6 +113,27 @@ class AddIndexerModalContent extends Component {
                     }
                   </div>
                 </FieldSet>
+
+                {
+                  directDownloadIndexers.length > 0 &&
+                    <FieldSet legend={translate('DirectDownload')}>
+                      <div className={styles.indexers}>
+                        {
+                          directDownloadIndexers.map((indexer) => {
+                            return (
+                              <AddIndexerItem
+                                key={indexer.implementation}
+                                implementation={indexer.implementation}
+                                {...indexer}
+                                implementationName={getDisplayName(indexer)}
+                                onIndexerSelect={onIndexerSelect}
+                              />
+                            );
+                          })
+                        }
+                      </div>
+                    </FieldSet>
+                }
               </div>
           }
         </ModalBody>
@@ -133,6 +155,7 @@ AddIndexerModalContent.propTypes = {
   schemaError: PropTypes.object,
   usenetIndexers: PropTypes.arrayOf(PropTypes.object).isRequired,
   torrentIndexers: PropTypes.arrayOf(PropTypes.object).isRequired,
+  directDownloadIndexers: PropTypes.arrayOf(PropTypes.object).isRequired,
   onIndexerSelect: PropTypes.func.isRequired,
   onModalClose: PropTypes.func.isRequired
 };

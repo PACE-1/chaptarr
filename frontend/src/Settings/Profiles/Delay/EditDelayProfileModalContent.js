@@ -25,10 +25,9 @@ function EditDelayProfileModalContent(props) {
     isSaving,
     saveError,
     item,
-    protocol,
-    protocolOptions,
+    enabledProtocols,
+    preferredProtocolOptions,
     onInputChange,
-    onProtocolChange,
     onSavePress,
     onModalClose,
     onDeleteDelayProfilePress,
@@ -38,8 +37,11 @@ function EditDelayProfileModalContent(props) {
   const {
     enableUsenet,
     enableTorrent,
+    enableDirectDownload,
+    preferredProtocol,
     usenetDelay,
     torrentDelay,
+    directDownloadDelay,
     bypassIfHighestQuality,
     bypassIfAboveCustomFormatScore,
     minimumCustomFormatScore,
@@ -69,19 +71,64 @@ function EditDelayProfileModalContent(props) {
           !isFetching && !error &&
             <Form {...otherProps}>
               <FormGroup>
-                <FormLabel>
-                  {translate('Protocol')}
-                </FormLabel>
+                <FormLabel>{translate('EnableUsenet')}</FormLabel>
 
                 <FormInputGroup
-                  type={inputTypes.SELECT}
-                  name="protocol"
-                  value={protocol}
-                  values={protocolOptions}
-                  helpText={translate('ProtocolHelpText')}
-                  onChange={onProtocolChange}
+                  type={inputTypes.CHECK}
+                  name="enableUsenet"
+                  {...enableUsenet}
+                  onChange={onInputChange}
                 />
               </FormGroup>
+
+              <FormGroup>
+                <FormLabel>{translate('EnableTorrent')}</FormLabel>
+
+                <FormInputGroup
+                  type={inputTypes.CHECK}
+                  name="enableTorrent"
+                  {...enableTorrent}
+                  onChange={onInputChange}
+                />
+              </FormGroup>
+
+              <FormGroup>
+                <FormLabel>{translate('EnableDirectDownload')}</FormLabel>
+
+                <FormInputGroup
+                  type={inputTypes.CHECK}
+                  name="enableDirectDownload"
+                  {...enableDirectDownload}
+                  onChange={onInputChange}
+                />
+              </FormGroup>
+
+              {
+                enabledProtocols.length === 0 ?
+                  <Alert kind={kinds.DANGER}>
+                    {translate('DelayProfileNoProtocolEnabled')}
+                  </Alert> :
+                  null
+              }
+
+              {
+                enabledProtocols.length > 1 ?
+                  <FormGroup>
+                    <FormLabel>
+                      {translate('PreferredProtocol')}
+                    </FormLabel>
+
+                    <FormInputGroup
+                      type={inputTypes.SELECT}
+                      name="preferredProtocol"
+                      {...preferredProtocol}
+                      values={preferredProtocolOptions}
+                      helpText={translate('PreferredProtocolHelpText')}
+                      onChange={onInputChange}
+                    />
+                  </FormGroup> :
+                  null
+              }
 
               {
                 enableUsenet.value ?
@@ -115,6 +162,25 @@ function EditDelayProfileModalContent(props) {
                       unit="minutes"
                       {...torrentDelay}
                       helpText={translate('TorrentDelayHelpText')}
+                      onChange={onInputChange}
+                    />
+                  </FormGroup> :
+                  null
+              }
+
+              {
+                enableDirectDownload.value ?
+                  <FormGroup>
+                    <FormLabel>
+                      {translate('DirectDownloadDelay')}
+                    </FormLabel>
+
+                    <FormInputGroup
+                      type={inputTypes.NUMBER}
+                      name="directDownloadDelay"
+                      unit="minutes"
+                      {...directDownloadDelay}
+                      helpText={translate('DirectDownloadDelayHelpText')}
                       onChange={onInputChange}
                     />
                   </FormGroup> :
@@ -217,8 +283,11 @@ function EditDelayProfileModalContent(props) {
 const delayProfileShape = {
   enableUsenet: PropTypes.shape(boolSettingShape).isRequired,
   enableTorrent: PropTypes.shape(boolSettingShape).isRequired,
+  enableDirectDownload: PropTypes.shape(boolSettingShape).isRequired,
+  preferredProtocol: PropTypes.object.isRequired,
   usenetDelay: PropTypes.shape(numberSettingShape).isRequired,
   torrentDelay: PropTypes.shape(numberSettingShape).isRequired,
+  directDownloadDelay: PropTypes.shape(numberSettingShape).isRequired,
   bypassIfHighestQuality: PropTypes.shape(boolSettingShape).isRequired,
   bypassIfAboveCustomFormatScore: PropTypes.shape(boolSettingShape).isRequired,
   minimumCustomFormatScore: PropTypes.shape(numberSettingShape).isRequired,
@@ -233,10 +302,9 @@ EditDelayProfileModalContent.propTypes = {
   isSaving: PropTypes.bool.isRequired,
   saveError: PropTypes.object,
   item: PropTypes.shape(delayProfileShape).isRequired,
-  protocol: PropTypes.string.isRequired,
-  protocolOptions: PropTypes.arrayOf(PropTypes.object).isRequired,
+  enabledProtocols: PropTypes.arrayOf(PropTypes.string).isRequired,
+  preferredProtocolOptions: PropTypes.arrayOf(PropTypes.object).isRequired,
   onInputChange: PropTypes.func.isRequired,
-  onProtocolChange: PropTypes.func.isRequired,
   onSavePress: PropTypes.func.isRequired,
   onModalClose: PropTypes.func.isRequired,
   onDeleteDelayProfilePress: PropTypes.func

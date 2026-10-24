@@ -8,6 +8,7 @@ import ModalBody from 'Components/Modal/ModalBody';
 import ModalContent from 'Components/Modal/ModalContent';
 import ModalFooter from 'Components/Modal/ModalFooter';
 import ModalHeader from 'Components/Modal/ModalHeader';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 
 class BlocklistDetailsModal extends Component {
@@ -46,7 +47,7 @@ class BlocklistDetailsModal extends Component {
 
               <DescriptionListItem
                 title={translate('Protocol')}
-                data={protocol}
+                data={getProtocolName(protocol)}
               />
 
               {

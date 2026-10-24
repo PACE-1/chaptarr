@@ -15,7 +15,7 @@ import ModalFooter from 'Components/Modal/ModalFooter';
 import ModalHeader from 'Components/Modal/ModalHeader';
 import { inputTypes, kinds } from 'Helpers/Props';
 import AdvancedSettingsButton from 'Settings/AdvancedSettingsButton';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import styles from './EditIndexerModalContent.css';
 
@@ -156,7 +156,7 @@ function EditIndexerModalContent(props) {
                 <FormInputGroup
                   type={inputTypes.TEXT}
                   name="protocolDisplay"
-                  value={protocol && protocol.value ? titleCase(protocol.value) : ''}
+                  value={protocol && protocol.value ? getProtocolName(protocol.value) : ''}
                   readOnly={true}
                   onChange={onInputChange}
                 />

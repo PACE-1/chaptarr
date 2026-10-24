@@ -22,12 +22,13 @@ namespace Chaptarr.Api.V1.Profiles.Delay
             SharedValidator.RuleFor(d => d.Tags).SetValidator(tagInUseValidator);
             SharedValidator.RuleFor(d => d.UsenetDelay).GreaterThanOrEqualTo(0);
             SharedValidator.RuleFor(d => d.TorrentDelay).GreaterThanOrEqualTo(0);
+            SharedValidator.RuleFor(d => d.DirectDownloadDelay).GreaterThanOrEqualTo(0).When(d => d.DirectDownloadDelay.HasValue);
 
             SharedValidator.RuleFor(d => d).Custom((delayProfile, context) =>
             {
-                if (!delayProfile.EnableUsenet && !delayProfile.EnableTorrent)
+                if (!delayProfile.EnableUsenet && !delayProfile.EnableTorrent && delayProfile.EnableDirectDownload == false)
                 {
-                    context.AddFailure("Either Usenet or Torrent should be enabled");
+                    context.AddFailure("At least one of Usenet, Torrent or Direct Download should be enabled");
                 }
             });
         }

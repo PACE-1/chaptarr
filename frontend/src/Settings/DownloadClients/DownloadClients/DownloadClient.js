@@ -5,7 +5,7 @@ import Label from 'Components/Label';
 import ConfirmModal from 'Components/Modal/ConfirmModal';
 import TagList from 'Components/TagList';
 import { kinds } from 'Helpers/Props';
-import titleCase from 'Utilities/String/titleCase';
+import getProtocolName from 'Utilities/String/getProtocolName';
 import translate from 'Utilities/String/translate';
 import EditDownloadClientModalConnector from './EditDownloadClientModalConnector';
 import styles from './DownloadClient.css';
@@ -94,7 +94,7 @@ class DownloadClient extends Component {
                 kind={kinds.INFO}
                 outline={true}
               >
-                {titleCase(protocol)}
+                {getProtocolName(protocol)}
               </Label>
           }
 
