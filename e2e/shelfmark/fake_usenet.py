@@ -27,6 +27,7 @@ CATALOG = json.loads(_catalog_file.read_text()) if _catalog_file.exists() else [
 _lock = threading.Lock()
 _history = []
 _grabs = []
+_webhooks = []
 
 
 def _words(text):
@@ -139,6 +140,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/grabs":
             with _lock:
                 return self._json(list(_grabs))
+        if url.path == "/webhooks":
+            with _lock:
+                return self._json(list(_webhooks))
         if url.path.startswith("/nzb/"):
             return self._send(200, '<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file subject="fake"><segments><segment bytes="1" number="1">fake@fake</segment></segments></file></nzb>', "application/x-nzb")
         if url.path in ("/newznab/api", "/newznab"):
@@ -163,6 +167,11 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 CATALOG[:] = json.loads(body)
             return self._json({"items": len(CATALOG)})
+        if url.path == "/webhook":
+            # Records Chaptarr's webhook notifications so the test can check they fire.
+            with _lock:
+                _webhooks.append(json.loads(body or b"{}"))
+            return self._json({"ok": True})
         if url.path in ("/sab/api", "/sab"):
             if b"Content-Disposition" in body:
                 for field in ("nzbname", "cat", "mode", "apikey"):
@@ -191,10 +200,14 @@ class Handler(BaseHTTPRequestHandler):
             if item is None:
                 return self._json({"status": False, "error": f"unknown nzb {source}"})
             nzo_id = f"SABnzbd_nzo_{uuid.uuid4().hex[:8]}"
-            storage = _complete(name, item)
+            # A catalog item with "fail": true finishes as a failed download, like a broken NZB.
+            failed = bool(item.get("fail"))
+            storage = "" if failed else _complete(name, item)
             with _lock:
                 _grabs.append({"nzo_id": nzo_id, "id": item["id"], "name": name, "category": params.get("cat")})
-                _history.insert(0, {"nzo_id": nzo_id, "name": name, "nzb_name": name + ".nzb", "status": "Completed",
+                _history.insert(0, {"nzo_id": nzo_id, "name": name, "nzb_name": name + ".nzb",
+                                    "status": "Failed" if failed else "Completed",
+                                    "fail_message": "Download failed: missing articles" if failed else "",
                                     "storage": storage, "category": params.get("cat") or "books", "bytes": item["size"]})
             return self._json({"status": True, "nzo_ids": [nzo_id]})
         if mode == "queue":

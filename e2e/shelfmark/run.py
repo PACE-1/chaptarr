@@ -25,6 +25,8 @@ LIBRARY = os.environ.get("LIBRARY_PATH", "/library")
 BOOK_TERM = os.environ.get("BOOK_TERM", "Project Hail Mary")
 BOOK_AUTHOR = os.environ.get("BOOK_AUTHOR", "Weir")
 FAKE_USENET = os.environ.get("FAKE_USENET_URL", "http://localhost:9000")
+# The fake as Chaptarr reaches it from inside the Docker network, for webhooks.
+FAKE_USENET_INTERNAL = os.environ.get("FAKE_USENET_INTERNAL_URL", "http://e2e-fake-usenet:9000")
 TIMEOUT = int(os.environ.get("E2E_TIMEOUT", "300"))
 
 
@@ -58,6 +60,16 @@ def wait_for(description, check, timeout=TIMEOUT, interval=5):
             return result
         time.sleep(interval)
     raise SystemExit(f"Timed out waiting for {description}")
+
+
+def set_catalog(items):
+    urllib.request.urlopen(urllib.request.Request(FAKE_USENET + "/catalog", data=json.dumps(items).encode(), method="POST"), timeout=30)
+
+
+def history(book_id, event):
+    data = api("GET", f"/history?page=1&pageSize=50&bookId={book_id}") or {}
+    records = data.get("records", data if isinstance(data, list) else [])
+    return [h for h in records if h.get("eventType") == event]
 
 
 def provider(kind, implementation, fields):
@@ -97,6 +109,19 @@ def main():
     step("adding Shelfmark download client (connection test included)")
     provider("downloadclient", "Shelfmark", {"host": SHELFMARK_HOST, "port": 8084, "apiKey": SHELFMARK_KEY})
 
+    step("adding a webhook so grab, import and failure notifications can be checked")
+    hook = next(n for n in api("GET", "/notification/schema") if n["implementation"] == "Webhook")
+    for field in hook["fields"]:
+        if field["name"] == "url":
+            field["value"] = FAKE_USENET_INTERNAL + "/webhook"
+        if field["name"] == "method":
+            field["value"] = 1
+    for key in list(hook):
+        if key.startswith("on") and hook.get("supports" + key[0].upper() + key[1:]) is not False:
+            hook[key] = True
+    hook["name"] = "e2e"
+    api("POST", "/notification", hook)
+
     step(f"looking up '{BOOK_TERM}'")
     results = api("GET", "/book/lookup?term=" + urllib.request.quote(BOOK_TERM))
     candidates = [b for b in results
@@ -130,11 +155,11 @@ def main():
     # title (e.g. "Frankenstein (Pulp! The Classics)") that differs from the lookup result.
     title = api("GET", f"/book/{book_id}")["title"]
     step(f"offering '{author_name} - {title}' from the fake indexer")
-    catalog = [
-        {"id": "fake-ebook-1", "title": f"{author_name} - {title} [epub]", "book": title, "author": author_name, "category": 7020, "size": 524288},
-        {"id": "fake-audio-1", "title": f"{author_name} - {title} [Audiobook] m4b", "book": title, "author": author_name, "category": 3030, "size": 104857600},
-    ]
-    urllib.request.urlopen(urllib.request.Request(FAKE_USENET + "/catalog", data=json.dumps(catalog).encode(), method="POST"), timeout=30)
+    good = {"id": "fake-ebook-1", "title": f"{author_name} - {title} [epub]", "book": title, "author": author_name, "category": 7020, "size": 524288}
+    # Offered first, alone: a release whose download fails, so Chaptarr has to notice the
+    # failure through Shelfmark, blocklist it and search again.
+    bad = {"id": "fake-ebook-bad", "title": f"{author_name} - {title} (Retail) [epub]", "book": title, "author": author_name, "category": 7020, "size": 524288, "fail": True}
+    set_catalog([bad])
 
     step("interactive search should list the Shelfmark release")
     response = api("GET", f"/release?bookId={book_id}")
@@ -146,16 +171,21 @@ def main():
     approved = [r for r in shelfmark if not r.get("rejected")]
     assert approved, "every Shelfmark release was rejected"
 
-    step("automatic search should grab it")
+    step("automatic search should grab the broken release")
     api("POST", "/command", {"name": "BookSearch", "bookIds": [book_id]})
-
-    def grabbed():
-        history = api("GET", f"/history?page=1&pageSize=20&bookId={book_id}") or {}
-        records = history.get("records", history if isinstance(history, list) else [])
-        return [h for h in records if h.get("eventType") == "grabbed"]
-
-    grab = wait_for("the release to be grabbed", grabbed)[0]
+    grab = wait_for("the release to be grabbed", lambda: history(book_id, "grabbed"))[0]
     step(f"grabbed '{grab['sourceTitle']}' (download id {grab.get('downloadId')})")
+    assert "(Retail)" in grab["sourceTitle"], grab["sourceTitle"]
+
+    set_catalog([bad, good])
+    step("the failure should be noticed through Shelfmark, blocklisted and searched again")
+    wait_for("the failed download to be recorded", lambda: history(book_id, "downloadFailed"), interval=10)
+    blocklist = api("GET", "/blocklist?page=1&pageSize=20") or {}
+    blocked = [b["sourceTitle"] for b in blocklist.get("records", [])]
+    assert any("(Retail)" in t for t in blocked), f"broken release not blocklisted: {blocked}"
+    regrab = wait_for("the good release to be grabbed",
+                      lambda: [h for h in history(book_id, "grabbed") if "(Retail)" not in h["sourceTitle"]], interval=10)[0]
+    step(f"grabbed '{regrab['sourceTitle']}' after the failure")
 
     def imported():
         files = api("GET", f"/bookfile?bookId={book_id}") or []
@@ -170,6 +200,16 @@ def main():
     for f in files:
         step(f"imported {f['path']}")
     assert all(f["path"].startswith(LIBRARY) for f in files), files
+
+    step("webhook notifications should have fired for grab, failure and import")
+    def hooks():
+        events = {h.get("eventType") for h in json.load(urllib.request.urlopen(FAKE_USENET + "/webhooks", timeout=30))}
+        return events if {"Grab", "DownloadFailure", "Download"} <= events else None
+    try:
+        wait_for("webhook notifications", hooks, timeout=120)
+    except SystemExit:
+        events = [h.get("eventType") for h in json.load(urllib.request.urlopen(FAKE_USENET + "/webhooks", timeout=30))]
+        raise AssertionError(f"webhook events received: {events}")
     step("PASS")
 
 
