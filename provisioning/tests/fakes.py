@@ -17,7 +17,7 @@ MASK = "********"
 class FakeServer:
     """Tiny JSON server: subclasses register (method, regex) -> handler(match, body, query)."""
 
-    def __init__(self):
+    def __init__(self, host: str = "127.0.0.1", port: int = 0):
         self.requests: list[tuple[str, str, object]] = []
         self.fail: dict[tuple[str, str], list[tuple[int, object]]] = {}
         self.routes: list[tuple[str, re.Pattern, object]] = []
@@ -59,7 +59,7 @@ class FakeServer:
             def do_DELETE(self):
                 self._go("DELETE")
 
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd = http.server.ThreadingHTTPServer((host, port), Handler)
         self.httpd.daemon_threads = True
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.thread.start()
@@ -250,8 +250,10 @@ class FakeChaptarr(FakeServer):
 
 
 class FakeAbs(FakeServer):
-    def __init__(self, api_key: str = "abs-admin-key-123456"):
-        super().__init__()
+    def __init__(self, api_key: str = "abs-admin-key-123456", host: str = "127.0.0.1", port: int = 0,
+                 settings_file: Path | None = None):
+        super().__init__(host, port)
+        self.settings_file = settings_file
         self.api_key = api_key
         self.users: dict[str, dict] = {"root1": {"id": "root1", "username": "root", "type": "root",
                                                  "permissions": {"accessAllLibraries": True}, "librariesAccessible": []}}
